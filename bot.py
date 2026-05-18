@@ -1,0 +1,1581 @@
+from telegram import ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+import time as time_module
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit
+import threading
+
+from db import (
+    add_user,
+    update_user_name,
+    user_exists,
+    get_user,
+    get_user_name,
+    set_referral,
+    get_main_balance,
+    get_play_balance,
+    update_main_balance,
+    update_play_balance,
+    deduct_bet_smart,
+    add_transaction,
+    get_last_5_transactions,
+    get_all_transactions,
+    get_total_deposits,
+    get_referral_count,
+    is_user_agent,
+    check_and_upgrade_agent,
+    get_depositing_referrals_count,
+    get_total_referral_deposits,
+    get_user_by_phone,
+    transaction_exists,
+    get_user_language,
+    set_user_language,
+    add_game_session,
+    complete_game_session,
+    get_game_history,
+    get_games_played_count,
+    get_games_won_count,
+    get_total_won,
+    get_top_by_deposit,
+    get_top_by_invitations,
+    get_top_by_games,
+    get_user_rank,
+)
+
+# --------------------------
+# CONFIG
+# --------------------------
+TOKEN = "8607291518:AAG1IFDDL4CrB8puYNkG8ZWbOTxOl8uK6xo"
+BOT_USERNAME = "adwabingiobot"
+ADMIN_IDS = [7627811244, 1119881250]
+MINI_APP_URL = "https://sebez733-png.github.io/bingio-mini-app/"
+
+# --------------------------
+# STATE & COUNTERS
+# --------------------------
+user_state = {}
+request_counter = 0
+withdraw_requests = {}
+
+# --------------------------
+# SHARED GAME STATE (for sync across all users)
+# --------------------------
+game_state = {
+    'running': False,
+    'game_id': None,
+    'called': [],
+    'started_at': None,
+    'time_left': 35,
+    'timer_started_at': None,
+    'total_players': 0,
+    'total_pot': 0,
+    'ready_players': {},      # ✅ NEW: Tracks who paid and is playing
+    'winner_declared': False, # ✅ NEW: Prevents multiple winners per round
+}
+
+# --------------------------
+# TRANSLATION DICTIONARY
+# --------------------------
+TEXTS = {
+    'select_language': {
+        'am': "👇 ቋንቋ ይምረጡ / Please select your language",
+        'en': "👇 Please select your language"
+    },
+    'welcome_new': {
+        'am': (
+            "🎉 እንኳን ወደ አድዋ Bingo በደህና መጡ!\n\n"
+            "1️⃣ ከታች ያለውን \"📱 ስልክ ቁጥር ያጋሩ\" ይጫኑ\n"
+            "2️⃣ ስልክ ቁጥርዎን ያረጋግጡ\n"
+            "3️⃣ ከዚያ በኋላ መጫወት ይጀምሩ! 🚀\n\n"
+            "👇 ለመጀመር ስልክ ቁጥርዎን ያጋሩ"
+        ),
+        'en': (
+            "🎉 Welcome to our Adwa Bingo Game!\n\n"
+            "1️⃣ Click the button below to share your phone number\n"
+            "2️⃣ Verify your number\n"
+            "3️⃣ Start playing! 🚀\n\n"
+            "👇 Share your phone number to begin:"
+        )
+    },
+    'share_phone_btn': {
+        'am': "📱 ስልክ ቁጥር ያጋሩ",
+        'en': "📱 Share Phone Number"
+    },
+    'welcome_back': {
+        'am': "👋 Welcome back!",
+        'en': "👋 Welcome back!"
+    },
+    'already_registered': {
+        'am': (
+            "⚠️ እርስዎ ቀድሞ ተመዝግበዋል!\n\n"
+            "📱 ስልክ: {phone}\n\n"
+            "💰 Main Wallet: {main} ETB\n"
+            "🎮 Play Wallet: {play} ETB\n"
+            "👥 Referrals: {ref_count}\n\n"
+            "👇 Choose an option below:"
+        ),
+        'en': (
+            "⚠️ You are already registered!\n\n"
+            "📱 Phone: {phone}\n\n"
+            "💰 Main Wallet: {main} ETB\n"
+            "🎮 Play Wallet: {play} ETB\n"
+            "👥 Referrals: {ref_count}\n\n"
+            "👇 Choose an option below:"
+        )
+    },
+    'register_success': {
+        'am': (
+            "🎉 እንኳን ወደ አድዋ Bingo ቤተሰብ በደህና መጡ!\n\n"
+            "✅ ምዝገባዎ በተሳካ ሁኔታ ተጠናቋል!\n\n"
+            "📱 ስልክ ቁጥር: {phone}\n\n"
+            "💰 Main Wallet: {main} ETB\n"
+            "🎮 Play Wallet: {play} ETB\n\n"
+            "🎯 አሁን መጫወት ለመጀመር ከታች ያለውን ቁልፍ ይጫኑ!\n"
+            "🍀 መልካም እድል!"
+        ),
+        'en': (
+            "🎉 Welcome to the Adwa Bingo Family!\n\n"
+            "✅ Registration successful!\n\n"
+            "📱 Phone: {phone}\n\n"
+            "💰 Main Wallet: {main} ETB\n"
+            "🎮 Play Wallet: {play} ETB\n\n"
+            "🎯 Click the menu below to start playing!\n"
+            "🍀 Good luck!"
+        )
+    },
+    'deposit_prompt': {
+        'am': "💳 ምን ያህል ማስገባት ይፈልጋሉ?\n(Enter amount)\n\nMin / ዝቅተኛ: 10 ብር / Birr",
+        'en': "💳 How much would you like to deposit?\n(Enter amount)\n\nMin: 10 Birr"
+    },
+    'withdraw_prompt': {
+        'am': (
+            "🐝 ማውጣት የሚፈልጉትን መጠን ይፃፉ (ETB):\n\n"
+            "🎮 Play Wallet: {play_bal} ETB\n"
+            "💰 Main Wallet: {main_bal} ETB\n\n"
+            "Min / ዝቅተኛ: 100 ብር"
+        ),
+        'en': (
+            "🐝 Enter withdrawal amount (ETB):\n\n"
+            "🎮 Play Wallet: {play_bal} ETB\n"
+            "💰 Main Wallet: {main_bal} ETB\n\n"
+            "Min: 100 Birr"
+        )
+    },
+    'withdraw_locked': {
+        'am': "❌ ማውጣት አይችሉም!\n\n⚠️ ገንዘብ ለማውጣት 50 ብር ማስገባት አለብዎት።\n\n❌ You cannot withdraw. You must deposit at least 50 ETB in total to unlock withdrawals.",
+        'en': "❌ Withdrawal locked!\n\n⚠️ You must deposit at least 50 ETB in total to unlock withdrawals."
+    },
+    'balance_msg': {
+        'am': "💰 WALLET BALANCE\n\n💰 Main Wallet: {main} ETB\n🎮 Play Wallet: {play} ETB",
+        'en': "💰 WALLET BALANCE\n\n💰 Main Wallet: {main} ETB\n🎮 Play Wallet: {play} ETB"
+    },
+    'deposit_success': {
+        'am': (
+            "💳 Deposit Successful\n\n"
+            "💰 Method: {method}\n"
+            "💰 Sent: {amount}\n"
+            "🎁 Bonus: {bonus}\n"
+            "📈 Total Added: {total}\n"
+            "💰 New Balance: {new_balance} ETB"
+        ),
+        'en': (
+            "💳 Deposit Successful\n\n"
+            "💰 Method: {method}\n"
+            "💰 Sent: {amount}\n"
+            "🎁 Bonus: {bonus}\n"
+            "📈 Total Added: {total}\n"
+            "💰 New Balance: {new_balance} ETB"
+        )
+    },
+    'lang_changed': {
+        'am': "✅ ቋንቋ ወደ አማርኛ ተቀይሯል!",
+        'en': "✅ Language changed to English!"
+    }
+}
+
+
+def t(key, lang='am', **kwargs):
+    text = TEXTS.get(key, {}).get(lang, TEXTS.get(key, {}).get('am', key))
+    if kwargs:
+        text = text.format(**kwargs)
+    return text
+
+
+# --------------------------
+# HELPER: Normalize Phone
+# --------------------------
+def normalize_phone(phone):
+    phone = phone.replace(" ", "").replace("+", "").replace("-", "").replace("(", "").replace(")", "")
+    if phone.startswith("251"):
+        phone = "0" + phone[3:]
+    if not phone.startswith("0") and len(phone) == 9:
+        phone = "0" + phone
+    return phone
+
+
+# --------------------------
+# HELPER: Get Main Menu
+# --------------------------
+def get_main_menu(lang='am'):
+    if lang == 'en':
+        return ReplyKeyboardMarkup([
+            ["🎮 Open Game"],
+            ["💳 Deposit", "💰 Balance"],
+            ["🐝 Withdraw", "📜 History"],
+            ["👤 Profile", "🏢 Support"],
+            ["🎁 Invite Friends", "🤖 Agent Panel"],
+            ["🔄 Transfer", "ℹ️ Info"]
+        ], resize_keyboard=True)
+    else:
+        return ReplyKeyboardMarkup([
+            ["🎮 Open Game / ይጫወቱ"],
+            ["💳 Deposit / ያስገቡ", "💰 Balance / ሂሳብ"],
+            ["🐝 Withdraw / ያውጡ", "📜 History / ታሪክ"],
+            ["👤 Profile / መገለጫ", "🏢 Support / ድጋፍ"],
+            ["🎁 Invite Friends / ጓደኛ ይጋብዙ", "🤖 Agent Panel"],
+            ["🔄 Transfer / ይላኩ", "ℹ️ Info / መረጃ"]
+        ], resize_keyboard=True)
+
+
+# --------------------------
+# HELPER: Get Inline Menu
+# --------------------------
+def get_inline_menu(lang='am'):
+    if lang == 'en':
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎮 Open Game", web_app=WebAppInfo(url=MINI_APP_URL))],
+            [
+                InlineKeyboardButton("💳 Deposit", callback_data="menu_deposit"),
+                InlineKeyboardButton("💰 Balance", callback_data="menu_balance")
+            ],
+            [
+                InlineKeyboardButton("🐝 Withdraw", callback_data="menu_withdraw"),
+                InlineKeyboardButton("📜 History", callback_data="menu_history")
+            ],
+            [
+                InlineKeyboardButton("👤 Profile", callback_data="menu_profile"),
+                InlineKeyboardButton("🏢 Support", callback_data="menu_support")
+            ],
+            [
+                InlineKeyboardButton("🎁 Invite Friends", callback_data="menu_invite"),
+                InlineKeyboardButton("🤖 Agent Panel", callback_data="menu_agent")
+            ],
+            [
+                InlineKeyboardButton("🔄 Transfer", callback_data="menu_transfer"),
+                InlineKeyboardButton("ℹ️ Info", callback_data="menu_info")
+            ]
+        ])
+    else:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎮 Open Game / ይጫወቱ", web_app=WebAppInfo(url=MINI_APP_URL))],
+            [
+                InlineKeyboardButton("💳 Deposit / ያስገቡ", callback_data="menu_deposit"),
+                InlineKeyboardButton("💰 Balance / ሂሳብ", callback_data="menu_balance")
+            ],
+            [
+                InlineKeyboardButton("🐝 Withdraw / ያውጡ", callback_data="menu_withdraw"),
+                InlineKeyboardButton("📜 History / ታሪክ", callback_data="menu_history")
+            ],
+            [
+                InlineKeyboardButton("👤 Profile / መገለጫ", callback_data="menu_profile"),
+                InlineKeyboardButton("🏢 Support / ድጋፍ", callback_data="menu_support")
+            ],
+            [
+                InlineKeyboardButton("🎁 Invite Friends / ጓደኛ ይጋብዙ", callback_data="menu_invite"),
+                InlineKeyboardButton("🤖 Agent Panel", callback_data="menu_agent")
+            ],
+            [
+                InlineKeyboardButton("🔄 Transfer / ይላኩ", callback_data="menu_transfer"),
+                InlineKeyboardButton("ℹ️ Info / መረጃ", callback_data="menu_info")
+            ]
+        ])
+
+
+# --------------------------
+# START
+# --------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    first_name = update.effective_user.first_name or ''
+    ref_id = context.args[0] if context.args else None
+    context.user_data["ref_by"] = ref_id
+
+    if user_exists(user_id):
+        lang = get_user_language(user_id)
+        update_user_name(user_id, first_name)
+        menu = get_main_menu(lang)
+        await update.message.reply_text(t('welcome_back', lang), reply_markup=menu)
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🇪🇹 አማርኛ", callback_data="lang_am"),
+            InlineKeyboardButton("🇸🇸 English", callback_data="lang_en")
+        ]
+    ])
+    await update.message.reply_text(t('select_language'), reply_markup=keyboard)
+
+
+# --------------------------
+# CONTACT REGISTER
+# --------------------------
+async def get_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    first_name = update.effective_user.first_name or ''
+    phone = normalize_phone(update.message.contact.phone_number)
+    lang = context.user_data.get("lang", 'am')
+
+    if user_exists(user_id):
+        lang = get_user_language(user_id)
+        user = get_user(user_id)
+        main = get_main_balance(user_id)
+        play = get_play_balance(user_id)
+        ref_count = get_referral_count(user_id)
+        text = t('already_registered', lang, phone=user[1], main=main, play=play, ref_count=ref_count)
+        await update.message.reply_text(text, reply_markup=get_inline_menu(lang))
+        await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
+        return
+
+    ref_by = context.user_data.get("ref_by")
+    add_user(user_id, phone, first_name)
+    set_user_language(user_id, lang)
+
+    if ref_by:
+        set_referral(user_id, ref_by)
+
+    main = get_main_balance(user_id)
+    play = get_play_balance(user_id)
+    text = t('register_success', lang, phone=phone, main=main, play=play)
+
+    await update.message.reply_text(text, reply_markup=get_inline_menu(lang))
+    await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
+
+
+# --------------------------
+# TEXT HANDLER
+# --------------------------
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom_text=None):
+    global request_counter
+    user_id = update.effective_user.id
+    text = custom_text if custom_text is not None else update.message.text
+
+    first_name = update.effective_user.first_name or ''
+    if first_name and user_exists(user_id):
+        update_user_name(user_id, first_name)
+
+    if user_exists(user_id):
+        lang = get_user_language(user_id)
+    else:
+        lang = context.user_data.get("lang", 'am')
+
+    main_menu_buttons_am = [
+        "🎮 Open Game / ይጫወቱ",
+        "💳 Deposit / ያስገቡ", "💰 Balance / ሂሳብ",
+        "🐝 Withdraw / ያውጡ", "📜 History / ታሪክ",
+        "👤 Profile / መገለጫ", "🏢 Support / ድጋፍ",
+        "🎁 Invite Friends / ጓደኛ ይጋብዙ", "🤖 Agent Panel",
+        "🔄 Transfer / ይላኩ", "ℹ️ Info / መረጃ"
+    ]
+    main_menu_buttons_en = [
+        "🎮 Open Game",
+        "💳 Deposit", "💰 Balance",
+        "🐝 Withdraw", "📜 History",
+        "👤 Profile", "🏢 Support",
+        "🎁 Invite Friends", "🤖 Agent Panel",
+        "🔄 Transfer", "ℹ️ Info"
+    ]
+
+    if text in main_menu_buttons_am or text in main_menu_buttons_en:
+        user_state.pop(user_id, None)
+        user_state.pop(f"{user_id}_amount", None)
+        user_state.pop(f"{user_id}_withdraw_amount", None)
+        user_state.pop(f"{user_id}_method", None)
+        user_state.pop(f"{user_id}_transfer_wallet", None)
+        user_state.pop(f"{user_id}_transfer_target", None)
+
+    if text in ["🎮 Open Game / ይጫወቱ", "🎮 Open Game"]:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎲 Play Bingo Now", web_app=WebAppInfo(url=MINI_APP_URL))]
+        ])
+        game_msg = "🎮 Tap the button below to open the Bingo Game:" if lang == 'en' else "🎮 የቢንጎ ጨዋታውን ለመክፈት ከታች ያለውን ቁልፍ ይጫኑ:"
+        await update.message.reply_text(game_msg, reply_markup=keyboard)
+        return
+
+    if text in ["💰 Balance / ሂሳብ", "💰 Balance"]:
+        main = get_main_balance(user_id)
+        play = get_play_balance(user_id)
+        await update.message.reply_text(t('balance_msg', lang, main=main, play=play))
+        return
+
+    if text in ["🏢 Support / ድጋፍ", "🏢 Support"]:
+        if lang == 'en':
+            support_msg = (
+                "☎️ Support\n\n"
+                "For any comments or questions, contact support:\n"
+                "@thelastking12312345678\n"
+                "@Silencedoeir\n"
+                "@one_day_82"
+            )
+        else:
+            support_msg = (
+                "☎️ Support (ድጋፍ)\n\n"
+                "For any comment and question, contact support:\n"
+                "@thelastking12312345678\n"
+                "@Silencedoeir\n"
+                "@one_day_82"
+            )
+        await update.message.reply_text(support_msg)
+        return
+
+    if text in ["📜 History / ታሪክ", "📜 History"]:
+        history = get_last_5_transactions(user_id)
+        if not history:
+            no_hist = "📜 ግብይት አልተደረገም / No transactions yet." if lang == 'am' else "📜 No transactions yet."
+            await update.message.reply_text(no_hist)
+            return
+        msg = "📜 LAST 5 TRANSACTIONS\n\n"
+        for tx in history:
+            tx_type, amount, time_str = tx
+            icon = "🟢 Deposit" if tx_type == "deposit" else "🔴 Withdraw"
+            clean_time = time_str.split('.')[0]
+            msg += f"{icon}\n💰 Amount: {amount} ETB\n⏰ Date: {clean_time}\n\n"
+        await update.message.reply_text(msg)
+        return
+
+    if text in ["👤 Profile / መገለጫ", "👤 Profile"]:
+        user = get_user(user_id)
+        if not user:
+            await update.message.reply_text("❌ User not found")
+            return
+        link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+        ref_count = get_referral_count(user_id)
+        played = get_games_played_count(user_id)
+        won = get_games_won_count(user_id)
+        total_won = get_total_won(user_id)
+        profile_msg = (
+            "👤 PROFILE\n\n"
+            f"🆔 ID: {user[0]}\n"
+            f"📱 Phone: {user[1]}\n\n"
+            f"💰 Main Wallet: {user[2]} ETB\n"
+            f"🎮 Play Wallet: {user[3]} ETB\n\n"
+            f"🎯 Games Played: {played}\n"
+            f"🏆 Games Won: {won}\n"
+            f"💵 Total Won: {total_won} ETB\n\n"
+            f"👥 Referrals: {ref_count}\n"
+            f"🎯 Invited By: {user[4] if len(user) > 4 and user[4] else 'No inviter'}\n\n"
+            f"🎁 Invite Link:\n{link}"
+        )
+        await update.message.reply_text(profile_msg)
+        return
+
+    if text in ["🎁 Invite Friends / ጓደኛ ይጋብዙ", "🎁 Invite Friends"]:
+        link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+        ref_count = get_referral_count(user_id)
+        invite_msg = (
+            "🎁 Invite Friends System\n\n"
+            f"👥 Your Invites: {ref_count}\n\n"
+            f"🔗 Your Referral Link:\n{link}\n\n"
+            "💰 Earn 10% commission from every deposit made by your referrals!"
+        )
+        await update.message.reply_text(invite_msg)
+        return
+
+    if text == "🤖 Agent Panel":
+        invites = get_referral_count(user_id)
+        depositors = get_depositing_referrals_count(user_id)
+        total_deposits = get_total_referral_deposits(user_id)
+        if is_user_agent(user_id):
+            agent_msg = (
+                "🤖 AGENT DASHBOARD\n\n"
+                "⭐ Status: Official Agent\n\n"
+                f"👥 Total Invites: {invites}\n"
+                f"💳 Depositing Referrals: {depositors}\n"
+                f"💰 Total Referral Deposits: {total_deposits} ETB\n\n"
+                "🎁 Commission Rate: 10% CASH (Main Wallet)\n\n"
+                "🚀 Keep inviting more friends to earn more real cash!"
+            )
+        else:
+            agent_msg = (
+                "🤖 AGENT UPGRADE PROGRAM\n\n"
+                "⭐ Status: Normal User (10% Play Wallet)\n\n"
+                "🎯 To become an Agent and earn 10% CASH (Main Wallet), you must achieve:\n\n"
+                f"1️⃣ 30+ Invites\nProgress: {invites}/30\n\n"
+                f"2️⃣ 20+ Depositing Referrals\nProgress: {depositors}/20\n\n"
+                f"3️⃣ 3000+ ETB Total Referral Deposits\nProgress: {total_deposits}/3000 ETB\n\n"
+                "💪 Keep sharing your referral link to hit these goals!"
+            )
+        await update.message.reply_text(agent_msg)
+        return
+
+    if text in ["ℹ️ Info / መረጃ", "ℹ️ Info"]:
+        await info(update, context, lang=lang)
+        return
+
+    if text in ["💳 Deposit / ያስገቡ", "💳 Deposit"]:
+        user_state[user_id] = "deposit_amount"
+        await update.message.reply_text(t('deposit_prompt', lang))
+        return
+
+    if text in ["🐝 Withdraw / ያውጡ", "🐝 Withdraw"]:
+        total_lifetime_deposits = get_total_deposits(user_id)
+        if total_lifetime_deposits < 50:
+            await update.message.reply_text(t('withdraw_locked', lang))
+            return
+        user_state[user_id] = "withdraw_amount"
+        play_bal = get_play_balance(user_id)
+        main_bal = get_main_balance(user_id)
+        await update.message.reply_text(t('withdraw_prompt', lang, play_bal=play_bal, main_bal=main_bal))
+        return
+
+    if user_state.get(user_id) == "deposit_amount":
+        if not text.isdigit():
+            err_msg = "❌ ቁጥር ብቻ ያስገቡ" if lang == 'am' else "❌ Please enter a valid number"
+            await update.message.reply_text(err_msg)
+            return
+        amount = int(text)
+        if amount < 10:
+            err_msg = "❌ ዝቅተኛ መጠን 10 ብር ነው" if lang == 'am' else "❌ Minimum amount is 10 Birr"
+            await update.message.reply_text(err_msg)
+            return
+        user_state[user_id] = "deposit_method"
+        user_state[f"{user_id}_amount"] = amount
+        keyboard = ReplyKeyboardMarkup(
+            [["Telebirr"], ["🔙 Back"]],
+            resize_keyboard=True
+        )
+        method_msg = "💳 Select Payment Method:" if lang == 'en' else "💳 የክፍያ ዘዴ ይምረጡ:"
+        await update.message.reply_text(method_msg, reply_markup=keyboard)
+        return
+
+    if user_state.get(user_id) == "withdraw_amount":
+        if not text.isdigit():
+            err_msg = "❌ ቁጥር ብቻ ያስገቡ" if lang == 'am' else "❌ Please enter a valid number"
+            await update.message.reply_text(err_msg)
+            return
+        amount = int(text)
+        balance = get_main_balance(user_id)
+        if amount > balance:
+            bal_msg = f"❌ በቂ ሂሳብ የለም (Main Wallet)\n💰 ያለዎት: {balance} ETB" if lang == 'am' else f"❌ Insufficient balance (Main Wallet)\n💰 You have: {balance} ETB"
+            await update.message.reply_text(bal_msg)
+            return
+        if amount < 100:
+            err_msg = "❌ ዝቅተኛ መጠን 100 ብር ነው" if lang == 'am' else "❌ Minimum amount is 100 Birr"
+            await update.message.reply_text(err_msg)
+            return
+        user_state[user_id] = "withdraw_method"
+        user_state[f"{user_id}_withdraw_amount"] = amount
+        keyboard = ReplyKeyboardMarkup(
+            [["Telebirr"], ["🔙 Back"]],
+            resize_keyboard=True
+        )
+        w_method_msg = "🏦 Select Withdraw Method:" if lang == 'en' else "🏦 የመውጣት ዘዴ ይምረጡ:"
+        await update.message.reply_text(w_method_msg, reply_markup=keyboard)
+        return
+
+    if user_state.get(user_id) == "deposit_method":
+        if text == "🔙 Back":
+            await update.message.reply_text("👇 Main Menu", reply_markup=get_inline_menu(lang))
+            await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
+            user_state.pop(user_id, None)
+            user_state.pop(f"{user_id}_amount", None)
+            return
+        if text == "Telebirr":
+            method = "Telebirr"
+            phone = "0998480054"
+            app_name_am = "ቴሌብር"
+        else:
+            err_msg = "❌ Please choose Telebirr" if lang == 'en' else "❌ ቴሌብር ይምረጡ"
+            await update.message.reply_text(err_msg)
+            return
+        amount = user_state.get(f"{user_id}_amount", 0)
+        user_state[user_id] = "deposit_confirm"
+        user_state[f"{user_id}_method"] = method
+        if lang == 'en':
+            pay_msg = (
+                f"💳 Payment Instructions\n\n"
+                f"Send {amount} Birr to:\n\n"
+                f"🏦 Method: {method}\n"
+                f"📱 Phone:\n`{phone}`\n\n"
+                f"ℹ️ After sending the money, copy the entire confirmation message from {method} and paste it here 👇👇👇"
+            )
+        else:
+            pay_msg = (
+                f"💳 የክፍያ መመሪያ\n\n"
+                f"ወደዚህ {amount} ብር ይላኩ\n\n"
+                f"🏦 የክፍያ መንግድ: {method}\n"
+                f"📱 ስልክ ቁጥር:\n`{phone}`\n\n"
+                f"ℹ️ ገንዘቡን ከላኩ በኋላ ከ{app_name_am} የተላከልዎትን ሙሉውን የማረጋገጫ መልእክት ኮፒ አድርገው እዚህ ላይ ፔስት አድርገው ይላኩ 👇👇👇\n\n"
+                f"ℹ️ After sending the money, copy and paste the entire confirmation message sent to you from {method} here 👇👇👇"
+            )
+        await update.message.reply_text(pay_msg, parse_mode="Markdown")
+        return
+
+    if user_state.get(user_id) == "withdraw_method":
+        if text == "🔙 Back":
+            await update.message.reply_text("👇 Main Menu", reply_markup=get_inline_menu(lang))
+            await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
+            user_state.pop(user_id, None)
+            user_state.pop(f"{user_id}_withdraw_amount", None)
+            return
+        if text == "Telebirr":
+            method = "Telebirr"
+        else:
+            await update.message.reply_text("❌ Please choose Telebirr")
+            return
+        amount = user_state.get(f"{user_id}_withdraw_amount", 0)
+        user = get_user(user_id)
+        user_phone = user[1] if user else "N/A"
+        user_state.pop(user_id, None)
+        user_state.pop(f"{user_id}_withdraw_amount", None)
+        await update.message.reply_text("⏳ Withdraw request sent to admin", reply_markup=get_main_menu(lang))
+        request_counter += 1
+        req_num = request_counter
+        withdraw_requests[req_num] = {
+            "user_id": user_id,
+            "amount": amount,
+            "method": method,
+            "phone": user_phone
+        }
+        admin_msg = (
+            f"🚨 WITHDRAW REQUEST #{req_num}\n\n"
+            f"👤 User ID: {user_id}\n"
+            f"📱 Phone: {user_phone}\n\n"
+            f"💰 Amount: {amount} ETB\n"
+            f"🏦 Method: {method}\n\n"
+            f"✅ To Approve send:\n/ap {req_num}\n\n"
+            f"❌ To Reject send:\n/re {req_num}"
+        )
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=admin_msg)
+            except:
+                pass
+
+    if user_state.get(user_id) == "deposit_confirm":
+        amount = user_state.get(f"{user_id}_amount", 0)
+        method = user_state.get(f"{user_id}_method", "Unknown")
+        bonus = int(amount * 0.10)
+        total = amount + bonus
+        update_play_balance(user_id, total)
+        add_transaction(user_id, "deposit", total)
+        new_balance = get_play_balance(user_id)
+        user = get_user(user_id)
+        ref_by = user[4] if user and len(user) > 4 else None
+        if ref_by:
+            if is_user_agent(int(ref_by)):
+                ref_bonus = int(amount * 0.10)
+                update_main_balance(int(ref_by), ref_bonus)
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(ref_by),
+                        text=(
+                            "🤝 Agent Cash Commission!\n\n"
+                            f"👤 Your referral made a deposit: {amount} ETB\n"
+                            f"💰 You earned: {ref_bonus} ETB (10% Cash)\n\n"
+                            "💸 Added to your Main Wallet (Withdrawable)!"
+                        )
+                    )
+                except:
+                    pass
+            else:
+                ref_bonus = int(amount * 0.10)
+                update_play_balance(int(ref_by), ref_bonus)
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(ref_by),
+                        text=(
+                            "🎉 Referral Deposit Bonus\n\n"
+                            f"👤 Your referral made a deposit: {amount} ETB\n"
+                            f"💰 You earned: {ref_bonus} ETB (10%)\n\n"
+                            "🙏 Keep inviting more friends!"
+                        )
+                    )
+                except:
+                    pass
+            if check_and_upgrade_agent(int(ref_by)):
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(ref_by),
+                        text=(
+                            "🎉 Congratulations! You are now an Official Agent! 🤝\n\n"
+                            "You have successfully achieved all the requirements:\n"
+                            "✅ 30+ Invites\n"
+                            "✅ 20+ Referral Deposits\n"
+                            "✅ 3000+ ETB Total Referral Deposits\n\n"
+                            "🎁 Your New Reward:\n"
+                            "From now on, all your invite bonuses will be 10% CASH added directly to your 💰 Main Wallet (Withdrawable)!\n\n"
+                            "🚀 Keep inviting more friends to earn more real cash!"
+                        )
+                    )
+                except:
+                    pass
+        user_state.pop(user_id, None)
+        user_state.pop(f"{user_id}_amount", None)
+        user_state.pop(f"{user_id}_method", None)
+        await update.message.reply_text(
+            t('deposit_success', lang, method=method, amount=amount, bonus=bonus, total=total, new_balance=new_balance),
+            reply_markup=get_inline_menu(lang)
+        )
+        await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
+        return
+
+    # TRANSFER FEATURE
+    if text in ["🔄 Transfer / ይላኩ", "🔄 Transfer"]:
+        total_lifetime_deposits = get_total_deposits(user_id)
+        if total_lifetime_deposits < 50:
+            err_msg = (
+                "❌ ማዞር (መላክ) አይችሉም!\n\n"
+                "⚠️ ገንዘብ ለማዞር (ለመላክ) 50 ብር ማስገባት አለብዎት።ፔ\n\n"
+                "❌ You cannot transfer. You must deposit at least 50 ETB in total to unlock transfers."
+            ) if lang == 'am' else "❌ Transfer locked!\n\n⚠️ You must deposit at least 50 ETB in total to unlock transfers."
+            await update.message.reply_text(err_msg)
+            return
+        user_state[user_id] = "transfer_select_wallet"
+        keyboard = ReplyKeyboardMarkup([["Main Wallet", "Play Wallet"], ["🔙 Back"]], resize_keyboard=True)
+        tr_msg = "🔄 Select the wallet you want to send from:" if lang == 'en' else "🔄 ከየትኛው ዋሌት መላክ ይፈልጋሉ?"
+        await update.message.reply_text(tr_msg, reply_markup=keyboard)
+        return
+
+    if user_state.get(user_id) == "transfer_select_wallet":
+        if text == "🔙 Back":
+            await update.message.reply_text("👇 Main Menu", reply_markup=get_inline_menu(lang))
+            await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
+            user_state.pop(user_id, None)
+            return
+        if text not in ["Main Wallet", "Play Wallet"]:
+            err_msg = "❌ Please choose Main Wallet or Play Wallet" if lang == 'en' else "❌ እባክዎ Main Wallet ወይም Play Wallet ይምረጡ"
+            await update.message.reply_text(err_msg)
+            return
+        user_state[f"{user_id}_transfer_wallet"] = text
+        user_state[user_id] = "transfer_phone"
+        keyboard = ReplyKeyboardMarkup([["🔙 Back"]], resize_keyboard=True)
+        phone_msg = (
+            "📱 Enter the registered phone number of the person you want to send to:\n\n(Example: 0912345678)"
+        ) if lang == 'en' else (
+            "📱 ለመላክ የሚፈልጉትን ስልክ ቁጥር ያስገቡ:\n\n(ምሳሌ: 0912345678)"
+        )
+        await update.message.reply_text(phone_msg, reply_markup=keyboard)
+        return
+
+    if user_state.get(user_id) == "transfer_phone":
+        if text == "🔙 Back":
+            user_state[user_id] = "transfer_select_wallet"
+            keyboard = ReplyKeyboardMarkup([["Main Wallet", "Play Wallet"], ["🔙 Back"]], resize_keyboard=True)
+            tr_msg = "🔄 Select the wallet you want to send from:" if lang == 'en' else "🔄 ከየትኛው ዋሌት መላክ ይፈልጋሉ?"
+            await update.message.reply_text(tr_msg, reply_markup=keyboard)
+            return
+        clean_phone = normalize_phone(text)
+        try:
+            from db import get_user_by_phone
+            receiver_user = get_user_by_phone(clean_phone)
+        except ImportError:
+            await update.message.reply_text("❌ Database error. Contact support.")
+            user_state.pop(user_id, None)
+            return
+        if not receiver_user:
+            err_msg = "❌ This phone number is not registered in our bot." if lang == 'en' else "❌ ይህ ስልክ ቁጥር በቦቱ ውስጥ አልተመዘገበም"
+            await update.message.reply_text(err_msg)
+            return
+        if receiver_user[0] == user_id:
+            err_msg = "❌ You cannot transfer money to yourself!" if lang == 'en' else "❌ ለራስዎ ገንዘብ ማዞር (መላክ) አይችሉም!"
+            await update.message.reply_text(err_msg)
+            return
+        user_state[f"{user_id}_transfer_target"] = receiver_user[0]
+        user_state[user_id] = "transfer_amount"
+        keyboard = ReplyKeyboardMarkup([["🔙 Back"]], resize_keyboard=True)
+        amt_msg = "💰 Enter the amount you want to transfer (ETB):\n\nMin: 10 ETB" if lang == 'en' else "💰 ለመላክ የሚፈልጉትን መጠን ያስገቡ (ETB):\n\nዝቅተኛ: 10 ETB"
+        await update.message.reply_text(amt_msg, reply_markup=keyboard)
+        return
+
+    if user_state.get(user_id) == "transfer_amount":
+        if text == "🔙 Back":
+            user_state[user_id] = "transfer_phone"
+            keyboard = ReplyKeyboardMarkup([["🔙 Back"]], resize_keyboard=True)
+            phone_msg = (
+                "📱 Enter the registered phone number of the person you want to send to:\n\n(Example: 0912345678)"
+            ) if lang == 'en' else (
+                "📱 ለመላክ የሚፈልጉትን ስልክ ቁጥር ያስገቡ:\n\n(ምሳሌ: 0912345678)"
+            )
+            await update.message.reply_text(phone_msg, reply_markup=keyboard)
+            return
+        if not text.isdigit():
+            err_msg = "❌ ቁጥር ብቻ ያስገቡ" if lang == 'am' else "❌ Please enter a valid number"
+            await update.message.reply_text(err_msg)
+            return
+        amount = int(text)
+        wallet_type = user_state.get(f"{user_id}_transfer_wallet")
+        target_id = user_state.get(f"{user_id}_transfer_target")
+        if amount < 10:
+            err_msg = "❌ ዝቅተኛ መጠን 10 ብር ነው" if lang == 'am' else "❌ Minimum amount is 10 ETB"
+            await update.message.reply_text(err_msg)
+            return
+        if wallet_type == "Main Wallet":
+            balance = get_main_balance(user_id)
+        else:
+            balance = get_play_balance(user_id)
+        if amount > balance:
+            err_msg = f"❌ በቂ ሂሳብ የለም ({wallet_type})\n💰 ያለዎት: {balance} ETB" if lang == 'am' else f"❌ Insufficient balance ({wallet_type})\n💰 Balance: {balance} ETB"
+            await update.message.reply_text(err_msg)
+            return
+        if wallet_type == "Main Wallet":
+            update_main_balance(user_id, -amount)
+            update_main_balance(target_id, amount)
+        else:
+            update_play_balance(user_id, -amount)
+            update_play_balance(target_id, amount)
+        add_transaction(user_id, "transfer_out", amount)
+        sender_name = update.effective_user.first_name
+        try:
+            receiver_chat = await context.bot.get_chat(target_id)
+            receiver_name = receiver_chat.first_name
+        except:
+            receiver_name = "User"
+        user_state.pop(user_id, None)
+        user_state.pop(f"{user_id}_transfer_wallet", None)
+        user_state.pop(f"{user_id}_transfer_target", None)
+        sender_success_msg = (
+            f"✅ Transfer Successful!\n\n"
+            f"💸 Sent: {amount} ETB\n"
+            f"👤 To: {receiver_name}\n"
+            f"🏦 Wallet: {wallet_type}\n"
+            f"✅ Money added to the user's {wallet_type}."
+        )
+        await update.message.reply_text(sender_success_msg, reply_markup=get_inline_menu(lang))
+        await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
+        receiver_msg = (
+            f"💰 Money Received!\n\n"
+            f"💸 Amount: {amount} ETB\n"
+            f"👤 From: {sender_name}\n"
+            f"🏦 Wallet: {wallet_type}\n"
+            f"✅ The money has been added to your {wallet_type}."
+        )
+        try:
+            await context.bot.send_message(chat_id=target_id, text=receiver_msg)
+        except:
+            pass
+        return
+
+    await update.message.reply_text("👇 Please use the menu buttons" if lang == 'en' else "👇 የሜኑ ቁልፎችን ይጠቀሙ")
+
+
+# --------------------------
+# WEB APP DATA HANDLER
+# --------------------------
+async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    data = update.message.web_app_data.data
+    print(f"🎮 Bingo win received from {user_name} ({user_id})! Data: {data}")
+    await update.message.reply_text(f"🎉 Congratulations! Your bingo result has been recorded!\n\nData: {data}")
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=f"🎮 User {user_name} just won a Bingo game!\nData: {data}")
+        except Exception as e:
+            print(f"Could not notify admin {admin_id}: {e}")
+
+
+# --------------------------
+# INLINE MENU & LANGUAGE HANDLER
+# --------------------------
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+
+    first_name = query.from_user.first_name or ''
+    if first_name and user_exists(user_id):
+        update_user_name(user_id, first_name)
+
+    if data in ["lang_am", "lang_en"]:
+        lang = 'am' if data == "lang_am" else 'en'
+        context.user_data["lang"] = lang
+        if user_exists(user_id):
+            set_user_language(user_id, lang)
+            await query.message.edit_text(t('lang_changed', lang))
+            await context.bot.send_message(chat_id=user_id, text=t('welcome_back', lang), reply_markup=get_main_menu(lang))
+        else:
+            button_text = t('share_phone_btn', lang)
+            button = KeyboardButton(button_text, request_contact=True)
+            keyboard = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
+            await query.message.edit_text(t('select_language'))
+            await context.bot.send_message(chat_id=user_id, text=t('welcome_new', lang), reply_markup=keyboard)
+        return
+
+    lang = get_user_language(user_id) if user_exists(user_id) else context.user_data.get("lang", 'am')
+
+    if data.startswith("menu_"):
+        user_state.pop(user_id, None)
+        user_state.pop(f"{user_id}_amount", None)
+        user_state.pop(f"{user_id}_withdraw_amount", None)
+        user_state.pop(f"{user_id}_method", None)
+        user_state.pop(f"{user_id}_transfer_wallet", None)
+        user_state.pop(f"{user_id}_transfer_target", None)
+
+    if data == "menu_open_game":
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎲 Play Bingo Now", web_app=WebAppInfo(url=MINI_APP_URL))]])
+        game_msg = "🎮 Tap the button below to open the Bingo Game:" if lang == 'en' else "🎮 የቢንጎ ጨዋታውን ለመክፈት ከታች ያለውን ቁልፍ ይጫኑ:"
+        await query.message.reply_text(game_msg, reply_markup=keyboard)
+    elif data == "menu_balance":
+        main = get_main_balance(user_id)
+        play = get_play_balance(user_id)
+        await query.message.reply_text(t('balance_msg', lang, main=main, play=play))
+    elif data == "menu_deposit":
+        user_state[user_id] = "deposit_amount"
+        await query.message.reply_text(t('deposit_prompt', lang))
+    elif data == "menu_withdraw":
+        total_lifetime_deposits = get_total_deposits(user_id)
+        if total_lifetime_deposits < 50:
+            await query.message.reply_text(t('withdraw_locked', lang))
+        else:
+            user_state[user_id] = "withdraw_amount"
+            play_bal = get_play_balance(user_id)
+            main_bal = get_main_balance(user_id)
+            await query.message.reply_text(t('withdraw_prompt', lang, play_bal=play_bal, main_bal=main_bal))
+    elif data == "menu_history":
+        history = get_last_5_transactions(user_id)
+        if not history:
+            no_hist = "📜 ግብይት አልተደረገም / No transactions yet." if lang == 'am' else "📜 No transactions yet."
+            await query.message.reply_text(no_hist)
+        else:
+            msg = "📜 LAST 5 TRANSACTIONS\n\n"
+            for tx in history:
+                tx_type, amount, time_str = tx
+                icon = "🟢 Deposit" if tx_type == "deposit" else "🔴 Withdraw"
+                clean_time = time_str.split('.')[0]
+                msg += f"{icon}\n💰 Amount: {amount} ETB\n⏰ Date: {clean_time}\n\n"
+            await query.message.reply_text(msg)
+    elif data == "menu_profile":
+        user = get_user(user_id)
+        if user:
+            link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+            ref_count = get_referral_count(user_id)
+            played = get_games_played_count(user_id)
+            won = get_games_won_count(user_id)
+            total_won_amt = get_total_won(user_id)
+            profile_msg = (
+                "👤 PROFILE\n\n"
+                f"🆔 ID: {user[0]}\n"
+                f"📱 Phone: {user[1]}\n\n"
+                f"💰 Main Wallet: {user[2]} ETB\n"
+                f"🎮 Play Wallet: {user[3]} ETB\n\n"
+                f"🎯 Games Played: {played}\n"
+                f"🏆 Games Won: {won}\n"
+                f"💵 Total Won: {total_won_amt} ETB\n\n"
+                f"👥 Referrals: {ref_count}\n"
+                f"🎯 Invited By: {user[4] if len(user) > 4 and user[4] else 'No inviter'}\n\n"
+                f"🎁 Invite Link:\n{link}"
+            )
+            await query.message.reply_text(profile_msg)
+        else:
+            await query.message.reply_text("❌ User not found")
+    elif data == "menu_support":
+        support_msg = (
+            "☎️ Support\n\nFor any comments or questions, contact support:\n@thelastking12312345678\n@Silencedoeir\n@one_day_82"
+        ) if lang == 'en' else (
+            "☎️ Support (ድጋፍ)\n\nFor any comment and question, contact support:\n@thelastking12312345678\n@Silencedoeir\n@one_day_82"
+        )
+        await query.message.reply_text(support_msg)
+    elif data == "menu_invite":
+        link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+        ref_count = get_referral_count(user_id)
+        invite_msg = (
+            "🎁 Invite Friends System\n\n"
+            f"👥 Your Invites: {ref_count}\n\n"
+            f"🔗 Your Referral Link:\n{link}\n\n"
+            "💰 Earn 10% commission from every deposit made by your referrals!"
+        )
+        await query.message.reply_text(invite_msg)
+    elif data == "menu_agent":
+        invites = get_referral_count(user_id)
+        depositors = get_depositing_referrals_count(user_id)
+        total_deposits = get_total_referral_deposits(user_id)
+        if is_user_agent(user_id):
+            agent_msg = (
+                "🤖 AGENT DASHBOARD\n\n⭐ Status: Official Agent\n\n"
+                f"👥 Total Invites: {invites}\n"
+                f"💳 Depositing Referrals: {depositors}\n"
+                f"💰 Total Referral Deposits: {total_deposits} ETB\n\n"
+                "🎁 Commission Rate: 10% CASH (Main Wallet)\n\n"
+                "🚀 Keep inviting more friends to earn more real cash!"
+            )
+        else:
+            agent_msg = (
+                "🤖 AGENT UPGRADE PROGRAM\n\n⭐ Status: Normal User (10% Play Wallet)\n\n"
+                f"1️⃣ 30+ Invites\nProgress: {invites}/30\n\n"
+                f"2️⃣ 20+ Depositing Referrals\nProgress: {depositors}/20\n\n"
+                f"3️⃣ 3000+ ETB Total Referral Deposits\nProgress: {total_deposits}/3000 ETB\n\n"
+                "💪 Keep sharing your referral link to hit these goals!"
+            )
+        await query.message.reply_text(agent_msg)
+    elif data == "menu_transfer":
+        total_lifetime_deposits = get_total_deposits(user_id)
+        if total_lifetime_deposits < 50:
+            err_msg = (
+                "❌ ማዞር (መላክ) አይችሉም!\n\n⚠️ ገንዘብ ለማዞር (ለመላክ) 50 ብር ማስገባት አለብዎት።ፔ\n\n❌ You cannot transfer. You must deposit at least 50 ETB in total to unlock transfers."
+            ) if lang == 'am' else "❌ Transfer locked!\n\n⚠️ You must deposit at least 50 ETB in total to unlock transfers."
+            await query.message.reply_text(err_msg)
+        else:
+            user_state[user_id] = "transfer_select_wallet"
+            keyboard = ReplyKeyboardMarkup([["Main Wallet", "Play Wallet"], ["🔙 Back"]], resize_keyboard=True)
+            tr_msg = "🔄 Select the wallet you want to send from:" if lang == 'en' else "🔄 ከየትኛው ዋሌት መላክ ይፈልጋሉ?"
+            await query.message.reply_text(tr_msg, reply_markup=keyboard)
+    elif data == "menu_info":
+        await info(update, context, lang=lang)
+
+
+# --------------------------
+# INFO
+# --------------------------
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE, lang=None):
+    if lang is None:
+        user_id = update.effective_user.id
+        if user_exists(user_id):
+            lang = get_user_language(user_id)
+        else:
+            lang = context.user_data.get("lang", 'am')
+    if lang == 'en':
+        await update.effective_message.reply_text(
+            "☎️ Support\n\nIf you have any problems, contact @one_day_82\n\n"
+            "ℹ️ Information\n\n🎮 How to play\n"
+            "1. Click \"Open Game\"\n2. Select your Bingo cards\n"
+            "3. Follow along as numbers are called\n4. Complete a winning pattern to win!\n\n"
+            "Good luck! 🍀"
+        )
+    else:
+        await update.effective_message.reply_text(
+            "☎️ Support(ድጋፍ)\n\nችግር ካጋጠመዎት @one_day_82 ን ያግኙ\n\n"
+            "ℹ️ Information(መረጃ)\n\n🎮 እንዴት እንደሚጫወቱ\n"
+            "1. \"Play Now/ይጫወቱ\" የሚለውን ይጫኑ\n"
+            "2. የቢንጎ ካርዶችዎን ይምረጡ\n"
+            "3. ቁጥሮች ሲጠሩ እየተከታተሉ ካርዶችዎ ውስጥ ካሉ ያጥቁሩ\n"
+            "4. ቢያንስ አንድ የማሸነፊያ ንድፍ ሲያጠናቅቁ \"BINGO\" ይበሉ\n\n"
+            "መልካም ዕድል ይገጥምዎ! 🍀"
+        )
+
+
+# --------------------------
+# APPROVE / REJECT
+# --------------------------
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not context.args:
+        await update.message.reply_text("❌ Please provide the request number. Example: /ap 1")
+        return
+    try:
+        req_num = int(context.args[0])
+    except:
+        await update.message.reply_text("❌ Invalid number. Example: /ap 1")
+        return
+    if req_num not in withdraw_requests:
+        await update.message.reply_text(f"❌ Request #{req_num} not found.")
+        return
+    req_data = withdraw_requests[req_num]
+    user_id = req_data["user_id"]
+    amount = req_data["amount"]
+    balance = get_main_balance(user_id)
+    if amount > balance:
+        await update.message.reply_text(f"❌ Insufficient user balance. User only has {balance} ETB.")
+        return
+    update_main_balance(user_id, -amount)
+    add_transaction(user_id, "withdraw", amount)
+    await context.bot.send_message(chat_id=user_id, text=f"✅ Withdraw Approved\n💰 Amount: {amount} ETB")
+    await update.message.reply_text(f"✅ Request #{req_num} Approved successfully")
+    del withdraw_requests[req_num]
+
+
+async def reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not context.args:
+        await update.message.reply_text("❌ Please provide the request number. Example: /re 1")
+        return
+    try:
+        req_num = int(context.args[0])
+    except:
+        await update.message.reply_text("❌ Invalid number. Example: /re 1")
+        return
+    if req_num not in withdraw_requests:
+        await update.message.reply_text(f"❌ Request #{req_num} not found.")
+        return
+    req_data = withdraw_requests[req_num]
+    user_id = req_data["user_id"]
+    await context.bot.send_message(chat_id=user_id, text="❌ Withdraw Request Rejected")
+    await update.message.reply_text(f"❌ Request #{req_num} Rejected successfully")
+    del withdraw_requests[req_num]
+
+
+# --------------------------
+# COMMAND SHORTCUTS
+# --------------------------
+async def cmd_play(update, context): await handle_text(update, context, custom_text="🎮 Open Game")
+async def cmd_deposit(update, context): await handle_text(update, context, custom_text="💳 Deposit")
+async def cmd_balance(update, context): await handle_text(update, context, custom_text="💰 Balance")
+async def cmd_withdraw(update, context): await handle_text(update, context, custom_text="🐝 Withdraw")
+async def cmd_profile(update, context): await handle_text(update, context, custom_text="👤 Profile")
+async def cmd_support(update, context): await handle_text(update, context, custom_text="🏢 Support")
+async def cmd_invite(update, context): await handle_text(update, context, custom_text="🎁 Invite Friends")
+async def cmd_transfer(update, context): await handle_text(update, context, custom_text="🔄 Transfer")
+async def cmd_history(update, context): await handle_text(update, context, custom_text="📜 History")
+async def cmd_agent(update, context): await handle_text(update, context, custom_text="🤖 Agent Panel")
+
+
+# ==========================
+# FLASK API SERVER + SOCKETIO
+# ==========================
+flask_app = Flask(__name__)
+CORS(flask_app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "ngrok-skip-browser-warning"]
+    }
+})
+
+socketio = SocketIO(flask_app, cors_allowed_origins="*", async_mode='threading')
+
+
+@flask_app.after_request
+def add_headers(response):
+    response.headers['ngrok-skip-browser-warning'] = 'true'
+    return response
+
+
+# ==========================================
+# SOCKETIO EVENTS (Real-Time Game Sync)
+# ==========================================
+
+@socketio.on('connect')
+def on_connect():
+    print(f'🔌 Client connected: {request.sid}')
+    time_left = 0
+    if game_state['timer_started_at'] and not game_state['running']:
+        time_left = max(0, 35 - int(time_module.time() - game_state['timer_started_at']))
+    emit('game_state_update', {
+        'game_running': game_state['running'],
+        'game_id': game_state['game_id'],
+        'time_left': time_left,
+        'total_players': game_state.get('total_players', 0),
+        'called_numbers': list(game_state.get('called', [])),
+        'current_number': game_state.get('current'),
+    })
+
+
+@socketio.on('disconnect')
+def on_disconnect():
+    print(f'🔌 Client disconnected: {request.sid}')
+
+
+@socketio.on('join_room')
+def on_join_room(data):
+    from flask_socketio import join_room
+    room = data.get('room', 'bingo_main')
+    join_room(room)
+    print(f'👤 Player joined room: {room}')
+
+
+@socketio.on('leave_room')
+def on_leave_room(data):
+    from flask_socketio import leave_room
+    room = data.get('room', 'bingo_main')
+    leave_room(room)
+
+
+@socketio.on('request_countdown')
+def on_request_countdown(data):
+    if not game_state['running']:
+        game_state['timer_started_at'] = time_module.time()
+        game_state['game_id'] = data.get('game_id', generate_game_id())
+        emit('countdown_update', {
+            'game_id': game_state['game_id'],
+            'time_left': 35
+        }, room='bingo_main')
+
+
+# ✅ NEW: TRACK PLAYERS WHO PAID AND ARE PLAYING
+@socketio.on('player_ready')
+def on_player_ready(data):
+    """Player confirmed their card selection and bet was deducted."""
+    user_id = data.get('user_id')
+    name = data.get('name', 'Player')
+    cards = data.get('cards', [])
+    game_id = data.get('game_id')
+
+    # Add player if the game_id matches and no winner declared yet
+    if game_id == game_state.get('game_id') and not game_state.get('winner_declared', False):
+        game_state['ready_players'][user_id] = {
+            'name': name,
+            'cards': cards,
+            'card_num': cards[0] if cards else '—',
+        }
+        total = len(game_state['ready_players'])
+        game_state['total_players'] = total
+    else:
+        total = len(game_state['ready_players'])
+
+    # Broadcast updated player count to everyone
+    emit('player_joined', {
+        'total_players': total,
+        'player_name': name,
+    }, room='bingo_main')
+    print(f'✅ Player ready: {name} ({user_id}), total: {total}')
+
+
+# ✅ NEW: HANDLE WINNER DECLARATION & PRIZE CALCULATION
+@socketio.on('declare_winner')
+def on_declare_winner(data):
+    """Client declares they have bingo — server validates and broadcasts."""
+    user_id = data.get('user_id')
+    winner_name = data.get('name', 'Player')
+    card_num = data.get('card_num', '—')
+    card_index = data.get('card_index', 0)
+    game_id = data.get('game_id', game_state.get('game_id'))
+
+    if game_state.get('winner_declared', False):
+        return  # Already have a winner this round
+    game_state['winner_declared'] = True
+
+    # Ensure the winner is in the list so prize is never 0
+    if user_id not in game_state['ready_players']:
+        game_state['ready_players'][user_id] = {
+            'name': winner_name,
+            'cards': [],
+            'card_num': card_num
+        }
+
+    total_players = len(game_state['ready_players'])
+    prize = round(total_players * 10 * 0.8)
+
+    print(f'🏆 Winner declared: {winner_name} card #{card_num}, prize: {prize}')
+
+    # Broadcast to ALL players
+    emit('winner_found', {
+        'user_id': user_id,
+        'winner_name': winner_name,
+        'card_num': card_num,
+        'card_index': card_index,
+        'prize': prize,
+        'total_players': total_players,
+        'game_id': game_id,
+    }, room='bingo_main')
+
+
+def generate_game_id():
+    d = time_module.localtime()
+    return f"{d.tm_year}{d.tm_mon:02d}{d.tm_mday:02d}_{int(time_module.time()%10000)}"
+
+
+# ── HEALTH CHECK ──
+@flask_app.route('/api/ping', methods=['GET', 'OPTIONS'])
+def api_ping():
+    return jsonify({'success': True, 'message': 'API is running', 'time': time_module.time()})
+
+
+# ── UPDATE USER NAME (from mini app) ──
+@flask_app.route('/api/update_name', methods=['POST', 'OPTIONS'])
+def api_update_name():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    first_name = data.get('first_name', '')
+    if not user_id or not first_name:
+        return jsonify({'success': False, 'error': 'user_id and first_name required'}), 400
+    try:
+        user_id = int(user_id)
+    except:
+        return jsonify({'success': False, 'error': 'invalid user_id'}), 400
+    if user_exists(user_id):
+        update_user_name(user_id, first_name)
+    return jsonify({'success': True})
+
+
+# ── BALANCE ──
+@flask_app.route('/api/balance', methods=['GET', 'OPTIONS'])
+def api_balance():
+    user_id = request.args.get('user_id', type=int)
+    if not user_id:
+        return jsonify({'success': False, 'error': 'user_id required'}), 400
+    if not user_exists(user_id):
+        return jsonify({'success': False, 'error': 'User not found. Please register in bot first.'}), 404
+    return jsonify({
+        'success': True,
+        'main_balance': get_main_balance(user_id),
+        'play_balance': get_play_balance(user_id)
+    })
+
+
+# ── BET (play wallet first, then main wallet) ──
+@flask_app.route('/api/bet', methods=['POST', 'OPTIONS'])
+def api_bet():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    amount = data.get('amount', 0)
+    if not user_id:
+        return jsonify({'success': False, 'error': 'user_id required'}), 400
+    try:
+        user_id = int(user_id)
+    except:
+        return jsonify({'success': False, 'error': 'invalid user_id'}), 400
+    if not user_exists(user_id):
+        return jsonify({'success': False, 'error': 'User not found'}), 404
+
+    success = deduct_bet_smart(user_id, amount)
+    if not success:
+        return jsonify({'success': False, 'error': 'Insufficient balance', 'play_balance': get_play_balance(user_id), 'main_balance': get_main_balance(user_id)}), 400
+
+    add_transaction(user_id, 'bingo_bet', amount)
+    return jsonify({
+        'success': True,
+        'main_balance': get_main_balance(user_id),
+        'play_balance': get_play_balance(user_id)
+    })
+
+
+# ── WIN ──
+@flask_app.route('/api/win', methods=['POST', 'OPTIONS'])
+def api_win():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    amount = data.get('amount', 0)
+    game_id = data.get('game_id', '')
+    if not user_id:
+        return jsonify({'success': False, 'error': 'user_id required'}), 400
+    try:
+        user_id = int(user_id)
+    except:
+        return jsonify({'success': False, 'error': 'invalid user_id'}), 400
+    if not user_exists(user_id):
+        return jsonify({'success': False, 'error': 'User not found'}), 404
+    update_main_balance(user_id, amount)
+    add_transaction(user_id, 'bingo_win', amount)
+    complete_game_session(user_id, game_id, result=f'+{amount} Br', prize=amount)
+    return jsonify({
+        'success': True,
+        'main_balance': get_main_balance(user_id),
+        'play_balance': get_play_balance(user_id)
+    })
+
+
+# ── RECORD GAME PLAYED ──
+@flask_app.route('/api/game_played', methods=['POST', 'OPTIONS'])
+def api_game_played():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    game_id = data.get('game_id', '')
+    cards = data.get('cards', [])
+    entry = data.get('entry', 10)
+    if not user_id:
+        return jsonify({'success': False, 'error': 'user_id required'}), 400
+    try:
+        user_id = int(user_id)
+    except:
+        return jsonify({'success': False, 'error': 'invalid user_id'}), 400
+    if not user_exists(user_id):
+        return jsonify({'success': False, 'error': 'User not found'}), 404
+    add_game_session(user_id, game_id, cards, entry)
+    return jsonify({'success': True})
+
+
+# ── GAME STATE ──
+@flask_app.route('/api/game_state', methods=['GET', 'OPTIONS'])
+def api_game_state():
+    now = time_module.time()
+    time_left = 35
+
+    if not game_state['running']:
+        if game_state['timer_started_at']:
+            elapsed = int(now - game_state['timer_started_at'])
+            time_left = max(0, 35 - elapsed)
+            if time_left == 0:
+                game_state['running'] = True
+                game_state['started_at'] = now
+        else:
+            game_state['timer_started_at'] = now
+            time_left = 35
+
+    return jsonify({
+        'game_running': game_state['running'],
+        'game_id': game_state['game_id'],
+        'time_left': time_left,
+        'total_players': len(game_state.get('ready_players', {})),
+    })
+
+
+# ── START GAME ──
+@flask_app.route('/api/start_game', methods=['POST', 'OPTIONS'])
+def api_start_game():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    game_state['running'] = True
+    game_state['game_id'] = data.get('game_id', '')
+    game_state['started_at'] = time_module.time()
+    game_state['timer_started_at'] = None
+    game_state['total_players'] = 0
+    game_state['ready_players'] = {}
+    game_state['winner_declared'] = False
+    return jsonify({'success': True})
+
+
+# ── END GAME ──
+@flask_app.route('/api/end_game', methods=['POST', 'OPTIONS'])
+def api_end_game():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    game_state['running'] = False
+    game_state['game_id'] = None
+    game_state['started_at'] = None
+    game_state['timer_started_at'] = time_module.time()
+    game_state['total_players'] = 0
+    # ✅ NEW: Reset for next round
+    game_state['ready_players'] = {}
+    game_state['winner_declared'] = False
+    return jsonify({'success': True})
+
+
+# ── PROFILE STATS ──
+@flask_app.route('/api/profile_stats', methods=['GET', 'OPTIONS'])
+def api_profile_stats():
+    user_id = request.args.get('user_id', type=int)
+    if not user_id or not user_exists(user_id):
+        return jsonify({'success': False, 'error': 'User not found'}), 404
+    return jsonify({
+        'success': True,
+        'games_played': get_games_played_count(user_id),
+        'games_won': get_games_won_count(user_id),
+        'total_won': get_total_won(user_id),
+        'invited': get_referral_count(user_id),
+    })
+
+
+# ── GAME HISTORY ──
+@flask_app.route('/api/game_history', methods=['GET', 'OPTIONS'])
+def api_game_history():
+    user_id = request.args.get('user_id', type=int)
+    if not user_id or not user_exists(user_id):
+        return jsonify({'success': False, 'error': 'User not found'}), 404
+    rows = get_game_history(user_id, limit=20)
+    history = []
+    for row in rows:
+        game_id, entry, status, result, ts = row
+        history.append({
+            'game_id': game_id,
+            'entry': entry,
+            'status': status,
+            'result': result,
+            'time': ts
+        })
+    return jsonify({'success': True, 'history': history})
+
+
+# ── TRANSACTIONS ──
+@flask_app.route('/api/transactions', methods=['GET', 'OPTIONS'])
+def api_transactions():
+    user_id = request.args.get('user_id', type=int)
+    if not user_id or not user_exists(user_id):
+        return jsonify({'success': False, 'error': 'User not found'}), 404
+    rows = get_all_transactions(user_id, limit=20)
+    txs = []
+    for row in rows:
+        tx_type, amount, status, ts = row
+        txs.append({
+            'type': tx_type,
+            'amount': amount,
+            'status': status,
+            'time': ts
+        })
+    return jsonify({'success': True, 'transactions': txs})
+
+
+# ── TOP WINNERS LEADERBOARD ──
+@flask_app.route('/api/top_winners', methods=['GET', 'OPTIONS'])
+def api_top_winners():
+    period = request.args.get('period', 'week')
+    category = request.args.get('category', 'deposit')
+
+    if category == 'deposit':
+        rows = get_top_by_deposit(period, 30)
+    elif category == 'invite':
+        rows = get_top_by_invitations(period, 30)
+    else:
+        rows = get_top_by_games(period, 30)
+
+    winners = []
+    for row in rows:
+        uid, first_name, value = row
+        name = first_name if first_name and first_name.strip() else 'User'
+        winners.append({'name': name, 'value': value})
+
+    return jsonify({'success': True, 'winners': winners})
+
+
+# ── MY RANK ──
+@flask_app.route('/api/my_rank', methods=['GET', 'OPTIONS'])
+def api_my_rank():
+    user_id = request.args.get('user_id', type=int)
+    period = request.args.get('period', 'week')
+    category = request.args.get('category', 'deposit')
+    if not user_id or not user_exists(user_id):
+        return jsonify({'success': False, 'error': 'User not found'}), 404
+    rank, value = get_user_rank(user_id, period, category)
+    return jsonify({'success': True, 'rank': rank, 'value': value})
+
+
+def run_flask():
+    socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
+
+
+# ==========================
+# APP SETUP
+# ==========================
+PROXY_URL = None
+builder = ApplicationBuilder().token(TOKEN)
+if PROXY_URL:
+    builder = builder.proxy(PROXY_URL).get_updates_proxy(PROXY_URL)
+builder = builder.connect_timeout(60.0).read_timeout(60.0).write_timeout(60.0).pool_timeout(60.0)
+app = builder.build()
+
+
+async def change_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🇪🇹 አማርኛ", callback_data="lang_am"),
+            InlineKeyboardButton("🇸🇸 English", callback_data="lang_en")
+        ]
+    ])
+    await update.message.reply_text(t('select_language', 'en'), reply_markup=keyboard)
+
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("lang", change_lang))
+app.add_handler(CommandHandler("info", info))
+app.add_handler(CommandHandler("ap", approve))
+app.add_handler(CommandHandler("re", reject))
+app.add_handler(CommandHandler("play", cmd_play))
+app.add_handler(CommandHandler("deposit", cmd_deposit))
+app.add_handler(CommandHandler("balance", cmd_balance))
+app.add_handler(CommandHandler("withdraw", cmd_withdraw))
+app.add_handler(CommandHandler("profile", cmd_profile))
+app.add_handler(CommandHandler("support", cmd_support))
+app.add_handler(CommandHandler("invite", cmd_invite))
+app.add_handler(CommandHandler("transfer", cmd_transfer))
+app.add_handler(CommandHandler("history", cmd_history))
+app.add_handler(CommandHandler("agent", cmd_agent))
+app.add_handler(CallbackQueryHandler(handle_callback))
+app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
+app.add_handler(MessageHandler(filters.CONTACT, get_contact))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
+print("✅ Bot is running with full Mini App API...")
+app.run_polling()
