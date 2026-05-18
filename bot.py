@@ -6,7 +6,6 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
 import os
-import random  # ✅ NEW
 from db import (
     add_user,
     update_user_name,
@@ -66,14 +65,13 @@ game_state = {
     'running': False,
     'game_id': None,
     'called': [],
-    'current': None,          # ✅ NEW
     'started_at': None,
     'time_left': 35,
     'timer_started_at': None,
     'total_players': 0,
     'total_pot': 0,
-    'ready_players': {},
-    'winner_declared': False,
+    'ready_players': {},      # ✅ NEW: Tracks who paid and is playing
+    'winner_declared': False, # ✅ NEW: Prevents multiple winners per round
 }
 
 # --------------------------
@@ -1159,7 +1157,6 @@ def on_connect():
         'game_running': game_state['running'],
         'game_id': game_state['game_id'],
         'time_left': time_left,
-        'call_count': len(game_state.get('called', [])),      # ✅ NEW
         'total_players': game_state.get('total_players', 0),
         'called_numbers': list(game_state.get('called', [])),
         'current_number': game_state.get('current'),
@@ -1177,19 +1174,6 @@ def on_join_room(data):
     room = data.get('room', 'bingo_main')
     join_room(room)
     print(f'👤 Player joined room: {room}')
-    # Send current state to this new client immediately
-    time_left = 0
-    if game_state['timer_started_at'] and not game_state['running']:
-        time_left = max(0, 35 - int(time_module.time() - game_state['timer_started_at']))
-    emit('game_state_update', {
-        'game_running': game_state['running'],
-        'game_id': game_state['game_id'],
-        'time_left': time_left,
-        'call_count': len(game_state.get('called', [])),
-        'total_players': game_state.get('total_players', 0),
-        'called_numbers': list(game_state.get('called', [])),
-        'current_number': game_state.get('current'),
-    })
 
 
 @socketio.on('leave_room')
@@ -1199,14 +1183,27 @@ def on_leave_room(data):
     leave_room(room)
 
 
-# ✅ TRACK PLAYERS WHO PAID AND ARE PLAYING
+@socketio.on('request_countdown')
+def on_request_countdown(data):
+    if not game_state['running']:
+        game_state['timer_started_at'] = time_module.time()
+        game_state['game_id'] = data.get('game_id', generate_game_id())
+        emit('countdown_update', {
+            'game_id': game_state['game_id'],
+            'time_left': 35
+        }, room='bingo_main')
+
+
+# ✅ NEW: TRACK PLAYERS WHO PAID AND ARE PLAYING
 @socketio.on('player_ready')
 def on_player_ready(data):
+    """Player confirmed their card selection and bet was deducted."""
     user_id = data.get('user_id')
     name = data.get('name', 'Player')
     cards = data.get('cards', [])
     game_id = data.get('game_id')
 
+    # Add player if the game_id matches and no winner declared yet
     if game_id == game_state.get('game_id') and not game_state.get('winner_declared', False):
         game_state['ready_players'][user_id] = {
             'name': name,
@@ -1218,16 +1215,18 @@ def on_player_ready(data):
     else:
         total = len(game_state['ready_players'])
 
-    socketio.emit('player_joined', {
+    # Broadcast updated player count to everyone
+    emit('player_joined', {
         'total_players': total,
         'player_name': name,
     }, room='bingo_main')
     print(f'✅ Player ready: {name} ({user_id}), total: {total}')
 
 
-# ✅ HANDLE WINNER DECLARATION — client says "I have bingo"
+# ✅ NEW: HANDLE WINNER DECLARATION & PRIZE CALCULATION
 @socketio.on('declare_winner')
 def on_declare_winner(data):
+    """Client declares they have bingo — server validates and broadcasts."""
     user_id = data.get('user_id')
     winner_name = data.get('name', 'Player')
     card_num = data.get('card_num', '—')
@@ -1238,6 +1237,7 @@ def on_declare_winner(data):
         return  # Already have a winner this round
     game_state['winner_declared'] = True
 
+    # Ensure the winner is in the list so prize is never 0
     if user_id not in game_state['ready_players']:
         game_state['ready_players'][user_id] = {
             'name': winner_name,
@@ -1248,10 +1248,10 @@ def on_declare_winner(data):
     total_players = len(game_state['ready_players'])
     prize = round(total_players * 10 * 0.8)
 
-    print(f'🏆 Winner: {winner_name} card #{card_num}, prize: {prize}')
+    print(f'🏆 Winner declared: {winner_name} card #{card_num}, prize: {prize}')
 
-    # ✅ Broadcast game_ended to ALL clients (same event HTML listens to)
-    socketio.emit('game_ended', {
+    # Broadcast to ALL players
+    emit('winner_found', {
         'user_id': user_id,
         'winner_name': winner_name,
         'card_num': card_num,
@@ -1265,101 +1265,6 @@ def on_declare_winner(data):
 def generate_game_id():
     d = time_module.localtime()
     return f"{d.tm_year}{d.tm_mon:02d}{d.tm_mday:02d}_{int(time_module.time()%10000)}"
-
-
-# ==========================================
-# ✅ SERVER-SIDE GAME LOOP
-# Runs in background — draws balls for ALL users identically
-# ==========================================
-def game_loop():
-    """Main loop: countdown → game_started → ball_called × 75 → game_ended → repeat"""
-    # Wait for Flask/SocketIO to fully start
-    time_module.sleep(3)
-    print("🎮 Game loop started!")
-
-    while True:
-        # ── PHASE 1: COUNTDOWN (35 seconds) ──
-        game_state['running'] = False
-        game_state['winner_declared'] = False
-        game_state['ready_players'] = {}
-        game_state['called'] = []
-        game_state['current'] = None
-        game_state['total_players'] = 0
-        game_state['game_id'] = generate_game_id()
-        game_state['timer_started_at'] = time_module.time()
-
-        print(f"⏳ Countdown started — Game ID: {game_state['game_id']}")
-
-        socketio.emit('countdown_update', {
-            'game_id': game_state['game_id'],
-            'time_left': 35,
-        }, room='bingo_main')
-
-        # Wait 35 seconds
-        time_module.sleep(35)
-
-        # Check minimum 2 cards/players
-        total = len(game_state['ready_players'])
-        if total < 2:
-            print(f"⚠️ Not enough players ({total}), restarting countdown...")
-            # Silently restart — no message, just loop again
-            continue
-
-        # ── PHASE 2: GAME STARTED ──
-        game_state['running'] = True
-        game_state['started_at'] = time_module.time()
-        game_state['timer_started_at'] = None
-
-        print(f"🚀 Game started! Players: {total}")
-
-        socketio.emit('game_started', {
-            'game_id': game_state['game_id'],
-            'total_players': total,
-        }, room='bingo_main')
-
-        # ── PHASE 3: DRAW BALLS every 2 seconds ──
-        numbers = list(range(1, 76))
-        random.shuffle(numbers)
-
-        for n in numbers:
-            if game_state.get('winner_declared', False):
-                break
-
-            game_state['called'].append(n)
-            game_state['current'] = n
-
-            socketio.emit('ball_called', {
-                'number': n,
-                'called': game_state['called'],
-                'call_count': len(game_state['called']),
-            }, room='bingo_main')
-
-            print(f"🎱 Ball: {n} ({len(game_state['called'])}/75)")
-
-            time_module.sleep(2)
-
-            if game_state.get('winner_declared', False):
-                break
-
-        # ── PHASE 4: END ──
-        time_module.sleep(1)
-
-        if not game_state.get('winner_declared', False):
-            # No winner after all 75 balls
-            game_state['winner_declared'] = True
-            total_players = len(game_state['ready_players'])
-            socketio.emit('game_ended', {
-                'game_id': game_state['game_id'],
-                'winner_name': '—',
-                'winner_card': '—',
-                'prize': 0,
-                'total_players': total_players,
-            }, room='bingo_main')
-            print("🏁 Game ended — no winner")
-
-        # Wait for winner screen (10s) + buffer
-        time_module.sleep(12)
-        print("🔄 Starting new round...")
 
 
 # ── HEALTH CHECK ──
@@ -1402,7 +1307,7 @@ def api_balance():
     })
 
 
-# ── BET ──
+# ── BET (play wallet first, then main wallet) ──
 @flask_app.route('/api/bet', methods=['POST', 'OPTIONS'])
 def api_bet():
     if request.method == 'OPTIONS':
@@ -1485,33 +1390,56 @@ def api_game_played():
 def api_game_state():
     now = time_module.time()
     time_left = 35
-    if game_state['timer_started_at'] and not game_state['running']:
-        elapsed = int(now - game_state['timer_started_at'])
-        time_left = max(0, 35 - elapsed)
+
+    if not game_state['running']:
+        if game_state['timer_started_at']:
+            elapsed = int(now - game_state['timer_started_at'])
+            time_left = max(0, 35 - elapsed)
+            if time_left == 0:
+                game_state['running'] = True
+                game_state['started_at'] = now
+        else:
+            game_state['timer_started_at'] = now
+            time_left = 35
+
     return jsonify({
         'game_running': game_state['running'],
         'game_id': game_state['game_id'],
         'time_left': time_left,
-        'call_count': len(game_state.get('called', [])),      # ✅ NEW: used by client to detect mid-game
         'total_players': len(game_state.get('ready_players', {})),
-        'called_numbers': list(game_state.get('called', [])), # ✅ NEW: late joiners can catch up
     })
 
 
-# ── START GAME (manual, kept for compatibility) ──
+# ── START GAME ──
 @flask_app.route('/api/start_game', methods=['POST', 'OPTIONS'])
 def api_start_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
-    return jsonify({'success': True, 'message': 'Game loop handles this automatically'})
+    data = request.json or {}
+    game_state['running'] = True
+    game_state['game_id'] = data.get('game_id', '')
+    game_state['started_at'] = time_module.time()
+    game_state['timer_started_at'] = None
+    game_state['total_players'] = 0
+    game_state['ready_players'] = {}
+    game_state['winner_declared'] = False
+    return jsonify({'success': True})
 
 
-# ── END GAME (manual, kept for compatibility) ──
+# ── END GAME ──
 @flask_app.route('/api/end_game', methods=['POST', 'OPTIONS'])
 def api_end_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
-    return jsonify({'success': True, 'message': 'Game loop handles this automatically'})
+    game_state['running'] = False
+    game_state['game_id'] = None
+    game_state['started_at'] = None
+    game_state['timer_started_at'] = time_module.time()
+    game_state['total_players'] = 0
+    # ✅ NEW: Reset for next round
+    game_state['ready_players'] = {}
+    game_state['winner_declared'] = False
+    return jsonify({'success': True})
 
 
 # ── PROFILE STATS ──
@@ -1573,17 +1501,20 @@ def api_transactions():
 def api_top_winners():
     period = request.args.get('period', 'week')
     category = request.args.get('category', 'deposit')
+
     if category == 'deposit':
         rows = get_top_by_deposit(period, 30)
     elif category == 'invite':
         rows = get_top_by_invitations(period, 30)
     else:
         rows = get_top_by_games(period, 30)
+
     winners = []
     for row in rows:
         uid, first_name, value = row
         name = first_name if first_name and first_name.strip() else 'User'
         winners.append({'name': name, 'value': value})
+
     return jsonify({'success': True, 'winners': winners})
 
 
@@ -1600,7 +1531,7 @@ def api_my_rank():
 
 
 def run_flask():
-    socketio.run(flask_app, host='0.0.0.0', port=int(os.environ.get('PORT', 5001)), debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
+   socketio.run(flask_app, host='0.0.0.0', port=int(os.environ.get('PORT', 5001)), debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
 
 
 # ==========================
@@ -1644,13 +1575,7 @@ app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app
 app.add_handler(MessageHandler(filters.CONTACT, get_contact))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-# ✅ Start Flask in background thread
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
-
-# ✅ Start game loop in background thread
-game_thread = threading.Thread(target=game_loop, daemon=True)
-game_thread.start()
-
-print("✅ Bot is running with full Mini App API + Server Game Loop...")
+print("✅ Bot is running with full Mini App API...")
 app.run_polling()
