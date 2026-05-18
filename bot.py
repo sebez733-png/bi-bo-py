@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
-
+import os
 from db import (
     add_user,
     update_user_name,
@@ -1531,7 +1531,7 @@ def api_my_rank():
 
 
 def run_flask():
-    socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
+   socketio.run(flask_app, host='0.0.0.0', port=int(os.environ.get('PORT', 5001)), debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
 
 
 # ==========================
