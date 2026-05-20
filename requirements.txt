@@ -1,0 +1,6 @@
+python-telegram-bot==20.7
+flask
+flask-cors
+flask-socketio
+psycopg2-binary
+eventlet
