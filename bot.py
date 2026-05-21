@@ -1719,6 +1719,55 @@ def api_remove_balance():
     return jsonify({'success': True, 'main_balance': new_bal, 'play_balance': db.get_play_balance(user_id)})
 
 
+# ✅ ADD THESE 4 NEW ROUTES BELOW:
+
+@flask_app.route('/api/admin/add_main_balance', methods=['POST', 'OPTIONS'])
+def api_add_main_balance():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    amount  = data.get('amount', 0)
+    new_bal = db.update_main_balance(user_id, amount)
+    db.add_transaction(user_id, 'admin_add_main', amount)
+    return jsonify({'success': True, 'main_balance': new_bal, 'play_balance': db.get_play_balance(user_id)})
+
+
+@flask_app.route('/api/admin/add_play_balance', methods=['POST', 'OPTIONS'])
+def api_add_play_balance():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    amount  = data.get('amount', 0)
+    new_bal = db.update_play_balance(user_id, amount)
+    db.add_transaction(user_id, 'admin_add_play', amount)
+    return jsonify({'success': True, 'main_balance': db.get_main_balance(user_id), 'play_balance': new_bal})
+
+
+@flask_app.route('/api/admin/remove_main_balance', methods=['POST', 'OPTIONS'])
+def api_remove_main_balance():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    amount  = data.get('amount', 0)
+    new_bal = db.update_main_balance(user_id, -amount)
+    db.add_transaction(user_id, 'admin_remove_main', amount)
+    return jsonify({'success': True, 'main_balance': new_bal, 'play_balance': db.get_play_balance(user_id)})
+
+
+@flask_app.route('/api/admin/remove_play_balance', methods=['POST', 'OPTIONS'])
+def api_remove_play_balance():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    amount  = data.get('amount', 0)
+    new_bal = db.update_play_balance(user_id, -amount)
+    db.add_transaction(user_id, 'admin_remove_play', amount)
+    return jsonify({'success': True, 'main_balance': db.get_main_balance(user_id), 'play_balance': new_bal})
+
 @flask_app.route('/api/admin/ban_user', methods=['POST', 'OPTIONS'])
 def api_ban_user():
     if request.method == 'OPTIONS':
