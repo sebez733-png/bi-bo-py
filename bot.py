@@ -1361,10 +1361,19 @@ def api_balance():
         return jsonify({'success': False, 'error': 'user_id required'}), 400
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found. Please register in bot first.'}), 404
+
+    # ✅ RETURN BANNED/FROZEN STATUS SO MINI APP KNOWS
+    full_user = get_user_full(user_id)
+    is_banned = full_user and full_user.get('status') == 'banned'
+    is_frozen = full_user and full_user.get('status') == 'frozen'
+
     return jsonify({
         'success': True,
         'main_balance': get_main_balance(user_id),
-        'play_balance': get_play_balance(user_id)
+        'play_balance': get_play_balance(user_id),
+        'is_banned': is_banned,
+        'is_frozen': is_frozen,
+        'is_vip': full_user and full_user.get('is_vip', 0) == 1
     })
 
 
@@ -1384,9 +1393,23 @@ def api_bet():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
+    # ✅ CHECK IF BANNED OR FROZEN
+    full_user = get_user_full(user_id)
+    if full_user and full_user.get('status') == 'banned':
+        return jsonify({'success': False, 'error': 'Account banned. Contact support.'}), 403
+    if full_user and full_user.get('status') == 'frozen':
+        return jsonify({'success': False, 'error': 'Account frozen. Contact support.'}), 403
+
     success = deduct_bet_smart(user_id, amount)
     if not success:
         return jsonify({'success': False, 'error': 'Insufficient balance', 'play_balance': get_play_balance(user_id), 'main_balance': get_main_balance(user_id)}), 400
+
+    add_transaction(user_id, 'bingo_bet', amount)
+    return jsonify({
+        'success': True,
+        'main_balance': get_main_balance(user_id),
+        'play_balance': get_play_balance(user_id)
+    })
 
     add_transaction(user_id, 'bingo_bet', amount)
     return jsonify({
@@ -1412,6 +1435,14 @@ def api_win():
         return jsonify({'success': False, 'error': 'invalid user_id'}), 400
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
+
+    # ✅ CHECK IF BANNED OR FROZEN
+    full_user = get_user_full(user_id)
+    if full_user and full_user.get('status') == 'banned':
+        return jsonify({'success': False, 'error': 'Account banned'}), 403
+    if full_user and full_user.get('status') == 'frozen':
+        return jsonify({'success': False, 'error': 'Account frozen'}), 403
+
     update_main_balance(user_id, amount)
     add_transaction(user_id, 'bingo_win', amount)
     complete_game_session(user_id, game_id, result=f'+{amount} Br', prize=amount)
