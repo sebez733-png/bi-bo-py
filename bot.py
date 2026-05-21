@@ -1719,8 +1719,6 @@ def api_remove_balance():
     return jsonify({'success': True, 'main_balance': new_bal, 'play_balance': db.get_play_balance(user_id)})
 
 
-# ✅ ADD THESE 4 NEW ROUTES BELOW:
-
 @flask_app.route('/api/admin/add_main_balance', methods=['POST', 'OPTIONS'])
 def api_add_main_balance():
     if request.method == 'OPTIONS':
@@ -1783,6 +1781,30 @@ def api_unban_user():
         return jsonify({'success': True}), 200
     data = request.json or {}
     db.unban_user(data.get('user_id'))
+    return jsonify({'success': True})
+
+
+# ✅ NEW: FREEZE & UNFREEZE ROUTES
+@flask_app.route('/api/admin/freeze_user', methods=['POST', 'OPTIONS'])
+def api_freeze_user():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    cur = db.get_cursor()
+    cur.execute("UPDATE users SET status='frozen' WHERE user_id=?", (user_id,))
+    db.conn.commit()
+    return jsonify({'success': True})
+
+@flask_app.route('/api/admin/unfreeze_user', methods=['POST', 'OPTIONS'])
+def api_unfreeze_user():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    user_id = data.get('user_id')
+    cur = db.get_cursor()
+    cur.execute("UPDATE users SET status='active' WHERE user_id=?", (user_id,))
+    db.conn.commit()
     return jsonify({'success': True})
 
 
