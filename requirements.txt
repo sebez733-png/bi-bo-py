@@ -2,5 +2,4 @@ python-telegram-bot==21.3
 flask
 flask-cors
 flask-socketio
-psycopg2-binary
 eventlet
