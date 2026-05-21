@@ -57,6 +57,8 @@ from db import (
     mark_vip,
     get_admin_game_history,
     get_admin_reports,
+    freeze_user,
+    unfreeze_user,
 )
 
 # --------------------------
