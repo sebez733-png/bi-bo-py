@@ -1023,7 +1023,6 @@ def set_user_language(user_id, lang):
 # ==========================================
 # PHONE LOOKUP
 # ==========================================
-
 def get_user_by_phone(phone):
     """Find a user by phone number — handles various Ethiopian phone formats."""
     clean = phone.replace(" ", "").replace("+", "").replace("-", "").replace("(", "").replace(")", "")
@@ -1046,3 +1045,17 @@ def get_user_by_phone(phone):
         FROM users WHERE phone IN ({placeholders})
     """, variations)
     return cur.fetchone()
+
+
+def freeze_user(user_id):
+    cur = get_cursor()
+    cur.execute("UPDATE users SET status='frozen' WHERE user_id=?", (user_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def unfreeze_user(user_id):
+    cur = get_cursor()
+    cur.execute("UPDATE users SET status='active' WHERE user_id=?", (user_id,))
+    conn.commit()
+    return cur.rowcount > 0
