@@ -1543,12 +1543,24 @@ def api_profile_stats():
     user_id = request.args.get('user_id', type=int)
     if not user_id or not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
+
+    # ✅ Safely check if user is VIP
+    is_vip = 0
+    try:
+        cur = get_cursor()
+        cur.execute("SELECT is_vip FROM users WHERE user_id=?", (user_id,))
+        row = cur.fetchone()
+        if row: is_vip = row[0] or 0
+    except Exception:
+        pass
+
     return jsonify({
         'success': True,
         'games_played': get_games_played_count(user_id),
         'games_won': get_games_won_count(user_id),
         'total_won': get_total_won(user_id),
         'invited': get_referral_count(user_id),
+        'is_vip': is_vip == 1
     })
 
 
