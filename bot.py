@@ -1,11 +1,10 @@
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 import time as time_module
-import random
-import threading
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
+import threading
 import db
 
 from db import (
@@ -70,6 +69,7 @@ BOT_USERNAME = "adwabingiobot"
 ADMIN_IDS = [7627811244, 1119881250]
 MINI_APP_URL = "https://sebez733-png.github.io/bingio-mini-app/"
 
+# ── ADMIN PANEL CREDENTIALS ──
 ADMIN_CREDENTIALS = {
     'superadmin': {'password': 'admin123', 'role': 'super'},
     'admin1':     {'password': 'pass123',  'role': 'regular'},
@@ -83,115 +83,23 @@ request_counter = 0
 withdraw_requests = {}
 
 # --------------------------
-# SHARED GAME STATE
+# SHARED GAME STATE (for sync across all users)
 # --------------------------
 game_state = {
     'running': False,
     'game_id': None,
     'called': [],
-    'current': None,
     'started_at': None,
     'time_left': 35,
     'timer_started_at': None,
     'total_players': 0,
     'total_pot': 0,
-    'ready_players': {},
-    'winner_declared': False,
-    'max_winners': 1,
-    'winner_count': 0,
-    'paused': False,
+    'ready_players': {},      # Tracks who paid and is playing
+    'winner_declared': False, # Prevents multiple winners per round
+    'max_winners': 1,         # ✅ ADMIN: Max winners per round
+    'winner_count': 0,        # ✅ ADMIN: Current winner count
+    'paused': False,          # ✅ ADMIN: Game pause state
 }
-
-# --------------------------
-# ✅ SERVER-SIDE BALL CALLING TIMER
-# --------------------------
-ball_call_timer = None
-
-def start_ball_timer():
-    """Server calls one ball every 2 seconds and broadcasts to ALL clients."""
-    global ball_call_timer
-    stop_ball_timer()
-
-    def call_next_ball():
-        global ball_call_timer
-        # Stop if game ended, paused, or winner found
-        if (not game_state.get('running') or
-                game_state.get('paused') or
-                game_state.get('winner_declared')):
-            return
-        called = game_state.get('called', [])
-        if len(called) >= 75:
-            return
-        pool = [n for n in range(1, 76) if n not in called]
-        if not pool:
-            return
-        number = random.choice(pool)
-        game_state.setdefault('called', []).append(number)
-        game_state['current'] = number
-        # Broadcast to every connected client — same ball for everyone
-        socketio.emit('ball_called', {'number': number}, room='bingo_main')
-        print(f"🎱 Server called ball: {number} (total called: {len(game_state['called'])})")
-        # Schedule next ball in 2 seconds
-        ball_call_timer = threading.Timer(2.0, call_next_ball)
-        ball_call_timer.start()
-
-    ball_call_timer = threading.Timer(2.0, call_next_ball)
-    ball_call_timer.start()
-    print("✅ Server ball timer started")
-
-def stop_ball_timer():
-    """Stop the server-side ball calling timer."""
-    global ball_call_timer
-    if ball_call_timer:
-        ball_call_timer.cancel()
-        ball_call_timer = None
-    print("⛔ Server ball timer stopped")
-
-# --------------------------
-# COUNTDOWN TIMER (before game starts)
-# --------------------------
-countdown_timer = None
-
-def start_countdown_timer(game_id, seconds=35):
-    """Broadcast countdown updates to all clients every second."""
-    global countdown_timer
-    stop_countdown_timer()
-    remaining = [seconds]
-
-    def tick():
-        global countdown_timer
-        if remaining[0] <= 0:
-            # Time up — start the game automatically
-            game_state['running'] = True
-            game_state['started_at'] = time_module.time()
-            game_state['timer_started_at'] = None
-            game_state['called'] = []
-            game_state['current'] = None
-            game_state['winner_declared'] = False
-            game_state['winner_count'] = 0
-            total = len(game_state.get('ready_players', {}))
-            socketio.emit('game_started', {
-                'game_id': game_id,
-                'total_players': total,
-            }, room='bingo_main')
-            print(f"🎮 Game {game_id} auto-started with {total} players")
-            start_ball_timer()
-            return
-        socketio.emit('countdown_update', {
-            'game_id': game_id,
-            'time_left': remaining[0],
-        }, room='bingo_main')
-        remaining[0] -= 1
-        countdown_timer = threading.Timer(1.0, tick)
-        countdown_timer.start()
-
-    tick()
-
-def stop_countdown_timer():
-    global countdown_timer
-    if countdown_timer:
-        countdown_timer.cancel()
-        countdown_timer = None
 
 # --------------------------
 # TRANSLATION DICTIONARY
@@ -321,6 +229,9 @@ def t(key, lang='am', **kwargs):
     return text
 
 
+# --------------------------
+# HELPER: Normalize Phone
+# --------------------------
 def normalize_phone(phone):
     phone = phone.replace(" ", "").replace("+", "").replace("-", "").replace("(", "").replace(")", "")
     if phone.startswith("251"):
@@ -330,6 +241,9 @@ def normalize_phone(phone):
     return phone
 
 
+# --------------------------
+# HELPER: Get Main Menu
+# --------------------------
 def get_main_menu(lang='am'):
     if lang == 'en':
         return ReplyKeyboardMarkup([
@@ -351,6 +265,9 @@ def get_main_menu(lang='am'):
         ], resize_keyboard=True)
 
 
+# --------------------------
+# HELPER: Get Inline Menu
+# --------------------------
 def get_inline_menu(lang='am'):
     if lang == 'en':
         return InlineKeyboardMarkup([
@@ -1248,29 +1165,20 @@ def add_headers(response):
 
 
 # ==========================================
-# SOCKETIO EVENTS (FIXED)
+# SOCKETIO EVENTS (Real-Time Game Sync)
 # ==========================================
 
 @socketio.on('connect')
 def on_connect():
     print(f'🔌 Client connected: {request.sid}')
-    
-    # ✅ FIX 1: Auto-join the bingo_main room on connect
-    from flask_socketio import join_room
-    join_room('bingo_main')
-    
     time_left = 0
     if game_state['timer_started_at'] and not game_state['running']:
         time_left = max(0, 35 - int(time_module.time() - game_state['timer_started_at']))
-    
-    # ✅ FIX 2: Use consistent total_players count
-    total_players = len(game_state.get('ready_players', {}))
-    
     emit('game_state_update', {
         'game_running': game_state['running'],
         'game_id': game_state['game_id'],
         'time_left': time_left,
-        'total_players': total_players,
+        'total_players': game_state.get('total_players', 0),
         'called_numbers': list(game_state.get('called', [])),
         'current_number': game_state.get('current'),
     })
@@ -1283,25 +1191,10 @@ def on_disconnect():
 
 @socketio.on('join_room')
 def on_join_room(data):
-    from flask_socketio import join_room as flask_join_room
+    from flask_socketio import join_room
     room = data.get('room', 'bingo_main')
-    flask_join_room(room)
+    join_room(room)
     print(f'👤 Player joined room: {room}')
-    # Send current game state to this specific newly joined client
-    time_left = 0
-    if game_state['timer_started_at'] and not game_state['running']:
-        time_left = max(0, 35 - int(time_module.time() - game_state['timer_started_at']))
-    
-    total_players = len(game_state.get('ready_players', {}))
-    
-    emit('game_state_update', {
-        'game_running': game_state['running'],
-        'game_id': game_state['game_id'],
-        'time_left': time_left,
-        'total_players': total_players,
-        'called_numbers': list(game_state.get('called', [])),
-        'current_number': game_state.get('current'),
-    })
 
 
 @socketio.on('leave_room')
@@ -1313,12 +1206,13 @@ def on_leave_room(data):
 
 @socketio.on('request_countdown')
 def on_request_countdown(data):
-    """Client requests a countdown — only start if not already running."""
-    if not game_state['running'] and not game_state.get('timer_started_at'):
-        gid = data.get('game_id', generate_game_id())
-        game_state['game_id'] = gid
+    if not game_state['running']:
         game_state['timer_started_at'] = time_module.time()
-        start_countdown_timer(gid, 35)
+        game_state['game_id'] = data.get('game_id', generate_game_id())
+        emit('countdown_update', {
+            'game_id': game_state['game_id'],
+            'time_left': 35
+        }, room='bingo_main')
 
 
 @socketio.on('player_ready')
@@ -1349,7 +1243,7 @@ def on_player_ready(data):
 
 @socketio.on('declare_winner')
 def on_declare_winner(data):
-    """Client declares bingo — server stops ball timer and broadcasts winner."""
+    """Client declares they have bingo — server validates and broadcasts."""
     user_id = data.get('user_id')
     winner_name = data.get('name', 'Player')
     card_num = data.get('card_num', '—')
@@ -1357,11 +1251,8 @@ def on_declare_winner(data):
     game_id = data.get('game_id', game_state.get('game_id'))
 
     if game_state.get('winner_declared', False):
-        return
+        return  # Already have a winner this round
     game_state['winner_declared'] = True
-
-    # ✅ Stop server ball timer immediately when winner is found
-    stop_ball_timer()
 
     if user_id not in game_state['ready_players']:
         game_state['ready_players'][user_id] = {
@@ -1387,7 +1278,7 @@ def on_declare_winner(data):
 
 
 # ══════════════════════════════════════════════════════════
-# ADMIN SOCKET EVENTS
+# ✅ ADMIN SOCKET EVENTS
 # ══════════════════════════════════════════════════════════
 
 @socketio.on('admin_manual_call')
@@ -1407,6 +1298,7 @@ def on_admin_manual_call(data):
 
 @socketio.on('set_max_winners')
 def on_set_max_winners(data):
+    """Admin sets max winners for next round."""
     mx = data.get('max', 1)
     game_state['max_winners'] = max(1, min(4, int(mx)))
     emit('max_winners_updated', {'max': game_state['max_winners']}, room='bingo_main')
@@ -1414,29 +1306,21 @@ def on_set_max_winners(data):
 
 @socketio.on('admin_pause_game')
 def on_admin_pause_game(data):
-    """Admin pauses/resumes the game — also pauses/resumes the ball timer."""
+    """Admin pauses/resumes the game."""
     game_state['paused'] = not game_state.get('paused', False)
-    if game_state['paused']:
-        stop_ball_timer()
-    else:
-        if game_state.get('running') and not game_state.get('winner_declared'):
-            start_ball_timer()
     emit('game_paused', {'paused': game_state['paused']}, room='bingo_main')
 
 
 @socketio.on('admin_cancel_game')
 def on_admin_cancel_game(data):
     """Admin cancels current game."""
-    stop_ball_timer()
-    stop_countdown_timer()
     game_state['running'] = False
     game_state['called']  = []
     game_state['current'] = None
     game_state['ready_players'] = {}
     game_state['winner_declared'] = False
     game_state['winner_count'] = 0
-    game_state['timer_started_at'] = None
-    game_state['paused'] = False
+    game_state['timer_started_at'] = time_module.time()
     emit('game_cancelled', {'reason': 'admin_cancelled'}, room='bingo_main')
 
 
@@ -1446,7 +1330,7 @@ def generate_game_id():
 
 
 # ==========================================
-# FLASK API ROUTES
+# EXISTING FLASK API ROUTES
 # ==========================================
 
 @flask_app.route('/api/ping', methods=['GET', 'OPTIONS'])
@@ -1480,17 +1364,18 @@ def api_balance():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found. Please register in bot first.'}), 404
 
+    # ✅ Safe status check with fallback
     status = 'active'
     is_vip = 0
     try:
-        cur = db.get_cursor()
+        cur = get_cursor()
         cur.execute("SELECT status, is_vip FROM users WHERE user_id=?", (user_id,))
         row = cur.fetchone()
         if row:
             status = row[0] or 'active'
             is_vip = row[1] or 0
     except Exception:
-        pass
+        pass  # If column doesn't exist, default to active
 
     return jsonify({
         'success': True,
@@ -1518,8 +1403,9 @@ def api_bet():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
+    # ✅ CHECK IF BANNED OR FROZEN (Safe with try/except)
     try:
-        cur = db.get_cursor()
+        cur = get_cursor()
         cur.execute("SELECT status FROM users WHERE user_id=?", (user_id,))
         row = cur.fetchone()
         if row and row[0] == 'banned':
@@ -1527,7 +1413,7 @@ def api_bet():
         if row and row[0] == 'frozen':
             return jsonify({'success': False, 'error': 'Account frozen. Contact support.'}), 403
     except Exception:
-        pass
+        pass  # If status column missing, allow the bet
 
     success = deduct_bet_smart(user_id, amount)
     if not success:
@@ -1558,8 +1444,9 @@ def api_win():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
+    # ✅ CHECK IF BANNED OR FROZEN (Safe with try/except)
     try:
-        cur = db.get_cursor()
+        cur = get_cursor()
         cur.execute("SELECT status FROM users WHERE user_id=?", (user_id,))
         row = cur.fetchone()
         if row and row[0] == 'banned':
@@ -1609,6 +1496,9 @@ def api_game_state():
         if game_state['timer_started_at']:
             elapsed = int(now - game_state['timer_started_at'])
             time_left = max(0, 35 - elapsed)
+            if time_left == 0:
+                game_state['running'] = True
+                game_state['started_at'] = now
         else:
             game_state['timer_started_at'] = now
             time_left = 35
@@ -1618,8 +1508,6 @@ def api_game_state():
         'game_id': game_state['game_id'],
         'time_left': time_left,
         'total_players': len(game_state.get('ready_players', {})),
-        'called_numbers': list(game_state.get('called', [])),
-        'current_number': game_state.get('current'),
     })
 
 
@@ -1628,44 +1516,27 @@ def api_start_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
     data = request.json or {}
-    stop_countdown_timer()
     game_state['running'] = True
-    game_state['game_id'] = data.get('game_id', generate_game_id())
+    game_state['game_id'] = data.get('game_id', '')
     game_state['started_at'] = time_module.time()
     game_state['timer_started_at'] = None
     game_state['total_players'] = 0
     game_state['ready_players'] = {}
     game_state['winner_declared'] = False
-    game_state['winner_count'] = 0
-    game_state['called'] = []
-    game_state['current'] = None
-    game_state['paused'] = False
-    # ✅ Start server-side ball calling
-    start_ball_timer()
-    socketio.emit('game_started', {
-        'game_id': game_state['game_id'],
-        'total_players': 0,
-    }, room='bingo_main')
-    return jsonify({'success': True, 'game_id': game_state['game_id']})
+    return jsonify({'success': True})
 
 
 @flask_app.route('/api/end_game', methods=['POST', 'OPTIONS'])
 def api_end_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
-    # ✅ Stop ball timer when game ends
-    stop_ball_timer()
-    stop_countdown_timer()
     game_state['running'] = False
     game_state['game_id'] = None
     game_state['started_at'] = None
-    game_state['timer_started_at'] = None
+    game_state['timer_started_at'] = time_module.time()
     game_state['total_players'] = 0
     game_state['ready_players'] = {}
     game_state['winner_declared'] = False
-    game_state['called'] = []
-    game_state['current'] = None
-    game_state['paused'] = False
     return jsonify({'success': True})
 
 
@@ -1675,9 +1546,10 @@ def api_profile_stats():
     if not user_id or not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
+    # ✅ Safely check if user is VIP
     is_vip = 0
     try:
-        cur = db.get_cursor()
+        cur = get_cursor()
         cur.execute("SELECT is_vip FROM users WHERE user_id=?", (user_id,))
         row = cur.fetchone()
         if row: is_vip = row[0] or 0
@@ -1764,9 +1636,8 @@ def api_my_rank():
     rank, value = get_user_rank(user_id, period, category)
     return jsonify({'success': True, 'rank': rank, 'value': value})
 
-
 # ══════════════════════════════════════════════════════════
-# ADMIN FLASK ROUTES
+# ✅ ADMIN FLASK ROUTES
 # ══════════════════════════════════════════════════════════
 
 @flask_app.route('/api/admin/dashboard', methods=['GET', 'OPTIONS'])
@@ -1861,7 +1732,7 @@ def api_reject_withdrawal():
     user_id = data.get('user_id')
     amount = data.get('amount', 0)
     if withdrawal_id in withdraw_requests:
-        db.update_main_balance(user_id, amount)
+        db.update_main_balance(user_id, amount)  # Refund
         del withdraw_requests[withdrawal_id]
     else:
         db.reject_withdrawal(withdrawal_id)
@@ -1950,7 +1821,6 @@ def api_remove_play_balance():
     db.add_transaction(user_id, 'admin_remove_play', amount)
     return jsonify({'success': True, 'main_balance': db.get_main_balance(user_id), 'play_balance': new_bal})
 
-
 @flask_app.route('/api/admin/ban_user', methods=['POST', 'OPTIONS'])
 def api_ban_user():
     if request.method == 'OPTIONS':
@@ -1969,6 +1839,7 @@ def api_unban_user():
     return jsonify({'success': True})
 
 
+# ✅ NEW: FREEZE & UNFREEZE ROUTES
 @flask_app.route('/api/admin/freeze_user', methods=['POST', 'OPTIONS'])
 def api_freeze_user():
     if request.method == 'OPTIONS':
@@ -1979,7 +1850,6 @@ def api_freeze_user():
     cur.execute("UPDATE users SET status='frozen' WHERE user_id=?", (user_id,))
     db.conn.commit()
     return jsonify({'success': True})
-
 
 @flask_app.route('/api/admin/unfreeze_user', methods=['POST', 'OPTIONS'])
 def api_unfreeze_user():
@@ -2034,11 +1904,6 @@ def api_pause_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
     game_state['paused'] = not game_state.get('paused', False)
-    if game_state['paused']:
-        stop_ball_timer()
-    else:
-        if game_state.get('running') and not game_state.get('winner_declared'):
-            start_ball_timer()
     socketio.emit('game_paused', {'paused': game_state['paused']}, room='bingo_main')
     return jsonify({'success': True, 'paused': game_state['paused']})
 
@@ -2047,15 +1912,11 @@ def api_pause_game():
 def api_cancel_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
-    stop_ball_timer()
-    stop_countdown_timer()
     game_state['running'] = False
     game_state['called']  = []
-    game_state['current'] = None
     game_state['ready_players'] = {}
     game_state['winner_declared'] = False
-    game_state['timer_started_at'] = None
-    game_state['paused'] = False
+    game_state['timer_started_at'] = time_module.time()
     socketio.emit('game_cancelled', {'reason': 'admin_cancelled'}, room='bingo_main')
     return jsonify({'success': True})
 
@@ -2165,11 +2026,5 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
-
-# ✅ Auto-start the countdown when bot launches (so clients see a timer immediately)
-_init_game_id = generate_game_id()
-game_state['game_id'] = _init_game_id
-game_state['timer_started_at'] = time_module.time()
-
-print("✅ Bot is running with server-side ball calling + Admin Panel...")
+print("✅ Bot is running with full Mini App API + Admin Panel...")
 app.run_polling()
