@@ -1474,7 +1474,7 @@ def api_game_played():
     user_id = data.get('user_id')
     game_id = data.get('game_id', '')
     cards = data.get('cards', [])
-    entry = data.get('stake', 10)  # ✅ CHANGED FROM 'entry' TO 'stake'
+    entry = data.get('stake', 10)
     if not user_id:
         return jsonify({'success': False, 'error': 'user_id required'}), 400
     try:
@@ -1484,6 +1484,36 @@ def api_game_played():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
     add_game_session(user_id, game_id, cards, entry)
+    return jsonify({'success': True})
+
+# 👇 ADD THESE NEW LINES BELOW 👇
+
+@flask_app.route('/api/admin/approve_withdrawal', methods=['POST', 'OPTIONS'])
+def api_approve_withdrawal():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    withdrawal_id = data.get('withdrawal_id')
+    user_id = data.get('user_id')
+    amount = data.get('amount')
+    
+    # TODO: Add your database logic here to change status to 'approved'
+    
+    print(f"ADMIN APPROVED Withdrawal #{withdrawal_id} for User {user_id} Amount {amount}")
+    return jsonify({'success': True})
+
+@flask_app.route('/api/admin/reject_withdrawal', methods=['POST', 'OPTIONS'])
+def api_reject_withdrawal():
+    if request.method == 'OPTIONS':
+        return jsonify({'success': True}), 200
+    data = request.json or {}
+    withdrawal_id = data.get('withdrawal_id')
+    user_id = data.get('user_id')
+    amount = data.get('amount')
+    
+    # TODO: Add your database logic here to change status to 'rejected' and refund balance
+    
+    print(f"ADMIN REJECTED Withdrawal #{withdrawal_id} for User {user_id} Amount {amount}")
     return jsonify({'success': True})
 
 
