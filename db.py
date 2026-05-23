@@ -909,6 +909,7 @@ def get_admin_game_history(limit=100):
                COUNT(user_id) as total_cards,
                SUM(entry_amount) as total_income,
                SUM(prize) as payout,
+               COUNT(CASE WHEN status='Won' THEN 1 END) as winners,
                MAX(time) as date
         FROM game_sessions
         GROUP BY game_id
@@ -917,18 +918,22 @@ def get_admin_game_history(limit=100):
     rows = cur.fetchall()
     games = []
     for r in rows:
-        pot    = r[2] or 0
-        payout = r[3] or 0
-        cards  = r[1] or 0
-        bet    = round(pot / cards) if cards > 0 else 10
+        cards   = r[1] or 0
+        pot     = r[2] or 0
+        payout  = r[3] or 0
+        winners = r[4] or 0
+        bet     = round(pot / cards) if cards > 0 else 10
+        # payout from DB is one winner's prize — multiply by winner count for total
+        total_payout = payout * winners if winners > 0 else payout
         games.append({
             'game_id':      r[0],
             'players':      cards,
             'bet':          bet,
+            'winners':      winners,
             'total_income': pot,
-            'payout':       payout,
-            'profit':       pot - payout,
-            'date':         r[4] or ''
+            'payout':       total_payout,
+            'profit':       pot - total_payout,
+            'date':         r[5] or ''
         })
     return games
 
