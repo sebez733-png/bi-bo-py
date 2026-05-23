@@ -1474,7 +1474,7 @@ def api_game_played():
     user_id = data.get('user_id')
     game_id = data.get('game_id', '')
     cards = data.get('cards', [])
-    entry = data.get('entry', 10)
+    entry = data.get('stake', 10)  # ✅ CHANGED FROM 'entry' TO 'stake'
     if not user_id:
         return jsonify({'success': False, 'error': 'user_id required'}), 400
     try:
