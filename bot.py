@@ -1715,9 +1715,19 @@ def api_approve_withdrawal():
     user_id       = data.get('user_id')
     amount        = data.get('amount', 0)
     
-    # ✅ DEDUCT THE MONEY FROM USER'S MAIN WALLET
+    # DEDUCT THE MONEY FROM USER'S MAIN WALLET
     db.update_main_balance(user_id, -amount)
     db.add_transaction(user_id, 'withdraw', amount)
+    
+    # ✅ SEND TELEGRAM MESSAGE TO USER
+    try:
+        import asyncio
+        asyncio.run_coroutine_threadsafe(
+            app.bot.send_message(chat_id=user_id, text=f"✅ Withdrawal Approved!\n\n💰 Amount: {amount} ETB\n🏦 The money has been sent to your account."),
+            app.updater.loop if app.updater else asyncio.get_event_loop()
+        )
+    except Exception as e:
+        print(f"Failed to send approval message to user {user_id}: {e}")
     
     if withdrawal_id in withdraw_requests:
         del withdraw_requests[withdrawal_id]
@@ -1736,7 +1746,17 @@ def api_reject_withdrawal():
     user_id = data.get('user_id')
     amount = data.get('amount', 0)
     
-    # ✅ NO REFUND NEEDED! The money was never deducted from their balance until approval.
+    # NO REFUND NEEDED! The money was never deducted from their balance until approval.
+    
+    # ✅ SEND TELEGRAM MESSAGE TO USER
+    try:
+        import asyncio
+        asyncio.run_coroutine_threadsafe(
+            app.bot.send_message(chat_id=user_id, text=f"❌ Withdrawal Rejected\n\n💰 Amount: {amount} ETB\n⚠️ Your request was rejected by admin. The money remains in your Main Wallet."),
+            app.updater.loop if app.updater else asyncio.get_event_loop()
+        )
+    except Exception as e:
+        print(f"Failed to send rejection message to user {user_id}: {e}")
     
     if withdrawal_id in withdraw_requests:
         del withdraw_requests[withdrawal_id]
@@ -1744,7 +1764,6 @@ def api_reject_withdrawal():
         db.reject_withdrawal(withdrawal_id)
         
     return jsonify({'success': True})
-
 
 @flask_app.route('/api/admin/users', methods=['GET', 'OPTIONS'])
 def api_admin_users():
