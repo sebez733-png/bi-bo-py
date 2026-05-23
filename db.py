@@ -540,13 +540,19 @@ def get_pending_withdrawals_count():
 # ==========================================
 
 def add_game_session(user_id, game_id, cards, entry_amount=10):
-    """Record that user joined a game."""
+    """Record that user joined a game — one row per card."""
     cur = get_cursor()
-    cards_str = ','.join(str(c) for c in cards) if isinstance(cards, list) else str(cards)
-    cur.execute("""
-        INSERT INTO game_sessions (user_id, game_id, cards, entry_amount, status, result)
-        VALUES (?, ?, ?, ?, 'playing', '-')
-    """, (user_id, game_id, cards_str, entry_amount))
+    if isinstance(cards, list) and len(cards) > 0:
+        for card in cards:
+            cur.execute("""
+                INSERT INTO game_sessions (user_id, game_id, cards, entry_amount, status, result)
+                VALUES (?, ?, ?, ?, 'playing', '-')
+            """, (user_id, game_id, str(card), entry_amount))
+    else:
+        cur.execute("""
+            INSERT INTO game_sessions (user_id, game_id, cards, entry_amount, status, result)
+            VALUES (?, ?, ?, ?, 'playing', '-')
+        """, (user_id, game_id, str(cards), entry_amount))
     conn.commit()
 
 
