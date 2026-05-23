@@ -557,15 +557,26 @@ def add_game_session(user_id, game_id, cards, entry_amount=10):
 
 
 def complete_game_session(user_id, game_id, result='-', prize=0):
-    """Update game session when game ends."""
+    """Update game session when game ends — only set prize on one row to avoid duplication."""
     cur = get_cursor()
     status = 'Won' if prize > 0 else 'Completed'
     result_str = f'+{prize} Br' if prize > 0 else '-'
+    # Update status on all rows
     cur.execute("""
         UPDATE game_sessions
-        SET status=?, result=?, prize=?
+        SET status=?, result=?
         WHERE user_id=? AND game_id=? AND status='playing'
-    """, (status, result_str, prize, user_id, game_id))
+    """, (status, result_str, user_id, game_id))
+    # Set prize on ONE row only
+    cur.execute("""
+        UPDATE game_sessions
+        SET prize=?
+        WHERE user_id=? AND game_id=? AND id=(
+            SELECT id FROM game_sessions
+            WHERE user_id=? AND game_id=?
+            ORDER BY id ASC LIMIT 1
+        )
+    """, (prize, user_id, game_id, user_id, game_id))
     conn.commit()
 
 
