@@ -889,7 +889,7 @@ def get_admin_game_history(limit=100):
     cur = get_cursor()
     cur.execute("""
         SELECT game_id,
-               COUNT(DISTINCT user_id) as players,
+               COUNT(user_id) as total_cards,
                SUM(entry_amount) as total_income,
                SUM(prize) as payout,
                MAX(time) as date
@@ -900,15 +900,18 @@ def get_admin_game_history(limit=100):
     rows = cur.fetchall()
     games = []
     for r in rows:
-        pot = r[2] or 0
+        pot    = r[2] or 0
         payout = r[3] or 0
+        cards  = r[1] or 0
+        bet    = round(pot / cards) if cards > 0 else 10
         games.append({
-            'game_id': r[0],
-            'players': r[1],
+            'game_id':      r[0],
+            'players':      cards,
+            'bet':          bet,
             'total_income': pot,
-            'payout': payout,
-            'profit': pot - payout,
-            'date': r[4] or ''
+            'payout':       payout,
+            'profit':       pot - payout,
+            'date':         r[4] or ''
         })
     return games
 
