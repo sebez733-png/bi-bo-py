@@ -1714,11 +1714,16 @@ def api_approve_withdrawal():
     withdrawal_id = data.get('withdrawal_id')
     user_id       = data.get('user_id')
     amount        = data.get('amount', 0)
+    
+    # ✅ DEDUCT THE MONEY FROM USER'S MAIN WALLET
+    db.update_main_balance(user_id, -amount)
+    db.add_transaction(user_id, 'withdraw', amount)
+    
     if withdrawal_id in withdraw_requests:
         del withdraw_requests[withdrawal_id]
-        db.add_transaction(user_id, 'withdraw', amount)
     else:
         db.approve_withdrawal(withdrawal_id)
+        
     return jsonify({'success': True})
 
 
@@ -1730,11 +1735,14 @@ def api_reject_withdrawal():
     withdrawal_id = data.get('withdrawal_id')
     user_id = data.get('user_id')
     amount = data.get('amount', 0)
+    
+    # ✅ NO REFUND NEEDED! The money was never deducted from their balance until approval.
+    
     if withdrawal_id in withdraw_requests:
-        db.update_main_balance(user_id, amount)  # Refund
         del withdraw_requests[withdrawal_id]
     else:
         db.reject_withdrawal(withdrawal_id)
+        
     return jsonify({'success': True})
 
 
