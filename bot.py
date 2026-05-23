@@ -1722,10 +1722,9 @@ def api_approve_withdrawal():
     # ✅ SEND TELEGRAM MESSAGE TO USER
     try:
         import asyncio
-        asyncio.run_coroutine_threadsafe(
-            app.bot.send_message(chat_id=user_id, text=f"✅ Withdrawal Approved!\n\n💰 Amount: {amount} ETB\n🏦 The money has been sent to your account."),
-            app.updater.loop if app.updater else asyncio.get_event_loop()
-        )
+        async def send_approval():
+            await app.bot.send_message(chat_id=user_id, text=f"✅ Withdrawal Approved!\n\n💰 Amount: {amount} ETB\n🏦 The money has been sent to your account.")
+        asyncio.run(send_approval())
     except Exception as e:
         print(f"Failed to send approval message to user {user_id}: {e}")
     
@@ -1751,10 +1750,9 @@ def api_reject_withdrawal():
     # ✅ SEND TELEGRAM MESSAGE TO USER
     try:
         import asyncio
-        asyncio.run_coroutine_threadsafe(
-            app.bot.send_message(chat_id=user_id, text=f"❌ Withdrawal Rejected\n\n💰 Amount: {amount} ETB\n⚠️ Your request was rejected by admin. The money remains in your Main Wallet."),
-            app.updater.loop if app.updater else asyncio.get_event_loop()
-        )
+        async def send_rejection():
+            await app.bot.send_message(chat_id=user_id, text=f"❌ Withdrawal Rejected\n\n💰 Amount: {amount} ETB\n⚠️ Your request was rejected by admin. The money remains in your Main Wallet.")
+        asyncio.run(send_rejection())
     except Exception as e:
         print(f"Failed to send rejection message to user {user_id}: {e}")
     
