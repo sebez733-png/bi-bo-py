@@ -79,7 +79,7 @@ ADMIN_CREDENTIALS = {
 # --------------------------
 # TELEBIRR SMS VERIFICATION
 # --------------------------
-MERCHANT_PHONE = "+2519****0054"
+MERCHANT_PHONE = "2519****0054"
 
 def get_merchant_phone_partial():
     p = MERCHANT_PHONE
