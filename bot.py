@@ -79,11 +79,19 @@ ADMIN_CREDENTIALS = {
 # --------------------------
 # TELEBIRR SMS VERIFICATION
 # --------------------------
-MERCHANT_PHONE = "2519****0054"
+MERCHANT_PHONE = "0998480054"
 
-def get_merchant_phone_partial():
-    p = MERCHANT_PHONE
-    return p[:4] + "****" + p[-2:]
+def get_merchant_phone_partials():
+    """
+    Returns all possible masked formats Telebirr uses for 0998480054:
+    - Local format:       0998****54
+    - International fmt:  2519****0054
+    """
+    p = MERCHANT_PHONE  # 0998480054
+    local_partial = p[:4] + "****" + p[-2:]           # 0998****54
+    intl = "251" + p[1:]                               # 251998480054
+    intl_partial = intl[:4] + "****" + intl[-4:]       # 2519****0054
+    return [local_partial, intl_partial]
 
 def _init_txn_table():
     conn = sqlite3.connect("bot_data.db")
@@ -145,12 +153,13 @@ def verify_telebirr_sms(sms_text: str, expected_amount: int) -> dict:
         return {'valid': False, 'reason': "❌ Could not find transaction number in SMS. Please paste the full SMS."}
     transaction_id = txn_match.group(1).strip()
 
-    # Extract receiver partial phone
+    # Extract receiver partial phone — handles both formats:
+    # (0998****54) and (2519****0054)
     phone_match = re.search(r'\((\d{4}\*+\d{2,4})\)', sms_text)
     if phone_match:
         receiver_partial = phone_match.group(1)
-        expected_partial = get_merchant_phone_partial()
-        if receiver_partial != expected_partial:
+        allowed_partials = get_merchant_phone_partials()
+        if receiver_partial not in allowed_partials:
             return {
                 'valid': False,
                 'reason': (
