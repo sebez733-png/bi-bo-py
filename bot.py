@@ -817,6 +817,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
         amount = user_state.get(f"{user_id}_amount", 0)
         method = user_state.get(f"{user_id}_method", "Unknown")
 
+        # ── Back button ──
+        if text == "🔙 Back":
+            user_state[user_id] = "deposit_method"
+            keyboard = ReplyKeyboardMarkup(
+                [["Telebirr"], ["🔙 Back"]],
+                resize_keyboard=True
+            )
+            method_msg = "💳 Select Payment Method:" if lang == 'en' else "💳 የክፍያ ዘዴ ይምረጡ:"
+            await update.message.reply_text(method_msg, reply_markup=keyboard)
+            return
+
         # Verify the SMS
         result = verify_telebirr_sms(sms_text=text, expected_amount=amount)
 
