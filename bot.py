@@ -330,7 +330,9 @@ TEXTS = {
     },
     'deposit_success': {
         'am': (
-            "💳 Deposit Successful\n\n"
+            "✅ Deposit Successful
+
+"
             "💰 Method: {method}\n"
             "💰 Sent: {amount}\n"
             "🎁 Bonus: {bonus}\n"
@@ -338,7 +340,9 @@ TEXTS = {
             "💰 New Balance: {new_balance} ETB"
         ),
         'en': (
-            "💳 Deposit Successful\n\n"
+            "✅ Deposit Successful
+
+"
             "💰 Method: {method}\n"
             "💰 Sent: {amount}\n"
             "🎁 Bonus: {bonus}\n"
