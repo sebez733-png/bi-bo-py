@@ -172,22 +172,30 @@ request_counter = 0
 withdraw_requests = {}
 
 # --------------------------
-# SHARED GAME STATE
+# SHARED GAME STATE (MULTI-ROOM)
 # --------------------------
-game_state = {
-    'running': False,
-    'game_id': None,
-    'called': [],
-    'started_at': None,
-    'time_left': 35,
-    'timer_started_at': None,
-    'total_players': 0,
-    'total_pot': 0,
-    'ready_players': {},
-    'winner_declared': False,
-    'max_winners': 1,
-    'winner_count': 0,
-    'paused': False,
+def default_game_state():
+    return {
+        'running': False,
+        'game_id': None,
+        'called': [],
+        'started_at': None,
+        'time_left': 35,
+        'timer_started_at': None,
+        'total_players': 0,
+        'total_pot': 0,
+        'ready_players': {},
+        'winner_declared': False,
+        'max_winners': 1,
+        'winner_count': 0,
+        'paused': False,
+        'current': None
+    }
+
+# Separate states for Room 10 and Room 20
+game_states = {
+    '10': default_game_state(),
+    '20': default_game_state()
 }
 
 # --------------------------
@@ -666,7 +674,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
 
     if user_state.get(user_id) == "withdraw_amount":
         if not text.isdigit():
-            err_msg = "❌ ቁጥር ብቻ ያስገቡ" if lang == 'am' else "❌ Please enter a valid number"
+            err_msg = "❌ ቁጥር ብቻ ያስገባ" if lang == 'am' else "❌ Please enter a valid number"
             await update.message.reply_text(err_msg)
             return
         amount = int(text)
@@ -1014,7 +1022,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
 
 
 # --------------------------
-# WEB APP DATA HANDLER
+# WEB app data handler
 # --------------------------
 async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1030,7 +1038,7 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # --------------------------
-# INLINE MENU & LANGUAGE HANDLER
+# inline menu & language handler
 # --------------------------
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1277,7 +1285,7 @@ async def cmd_agent(update, context): await handle_text(update, context, custom_
 
 
 # ==========================
-# FLASK API SERVER + SOCKETIO
+# FLASK API SERVER + SOCKETIO (MULTI-ROOM UPDATED)
 # ==========================
 flask_app = Flask(__name__)
 CORS(flask_app, resources={
@@ -1300,17 +1308,20 @@ def add_headers(response):
 @socketio.on('connect')
 def on_connect():
     print(f'🔌 Client connected: {request.sid}')
-    time_left = 0
-    if game_state['timer_started_at'] and not game_state['running']:
-        time_left = max(0, 35 - int(time_module.time() - game_state['timer_started_at']))
-    emit('game_state_update', {
-        'game_running': game_state['running'],
-        'game_id': game_state['game_id'],
-        'time_left': time_left,
-        'total_players': game_state.get('total_players', 0),
-        'called_numbers': list(game_state.get('called', [])),
-        'current_number': game_state.get('current'),
-    })
+    # Send state for both rooms so frontend can know what's available
+    for room_id, game in game_states.items():
+        time_left = 0
+        if game['timer_started_at'] and not game['running']:
+            time_left = max(0, 35 - int(time_module.time() - game['timer_started_at']))
+        emit('game_state_update', {
+            'room': room_id,
+            'game_running': game['running'],
+            'game_id': game['game_id'],
+            'time_left': time_left,
+            'total_players': game.get('total_players', 0),
+            'called_numbers': list(game.get('called', [])),
+            'current_number': game.get('current'),
+        })
 
 
 @socketio.on('disconnect')
@@ -1321,76 +1332,89 @@ def on_disconnect():
 @socketio.on('join_room')
 def on_join_room(data):
     from flask_socketio import join_room
-    room = data.get('room', 'bingo_main')
-    join_room(room)
-    print(f'👤 Player joined room: {room}')
+    room = data.get('room', '10')
+    socket_room = f'bingo_room_{room}'
+    join_room(socket_room)
+    print(f'👤 Player joined room: {socket_room}')
 
 
 @socketio.on('leave_room')
 def on_leave_room(data):
     from flask_socketio import leave_room
-    room = data.get('room', 'bingo_main')
-    leave_room(room)
+    room = data.get('room', '10')
+    socket_room = f'bingo_room_{room}'
+    leave_room(socket_room)
 
 
 @socketio.on('request_countdown')
 def on_request_countdown(data):
-    if not game_state['running']:
-        game_state['timer_started_at'] = time_module.time()
-        game_state['game_id'] = data.get('game_id', generate_game_id())
-        emit('countdown_update', {
-            'game_id': game_state['game_id'],
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
+    if not game['running']:
+        game['timer_started_at'] = time_module.time()
+        game['game_id'] = data.get('game_id', generate_game_id())
+        socketio.emit('countdown_update', {
+            'room': room,
+            'game_id': game['game_id'],
             'time_left': 35
-        }, room='bingo_main')
+        }, room=f'bingo_room_{room}')
 
 
 @socketio.on('player_ready')
 def on_player_ready(data):
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
+    
     user_id = data.get('user_id')
     name = data.get('name', 'Player')
     cards = data.get('cards', [])
     game_id = data.get('game_id')
 
-    if game_id == game_state.get('game_id') and not game_state.get('winner_declared', False):
-        game_state['ready_players'][user_id] = {
+    if game_id == game.get('game_id') and not game.get('winner_declared', False):
+        game['ready_players'][user_id] = {
             'name': name,
             'cards': cards,
             'card_num': cards[0] if cards else '—',
         }
-        total = len(game_state['ready_players'])
-        game_state['total_players'] = total
+        total = len(game['ready_players'])
+        game['total_players'] = total
     else:
-        total = len(game_state['ready_players'])
+        total = len(game['ready_players'])
 
-    emit('player_joined', {
+    socketio.emit('player_joined', {
+        'room': room,
         'total_players': total,
         'player_name': name,
-    }, room='bingo_main')
+    }, room=f'bingo_room_{room}')
 
 
 @socketio.on('declare_winner')
 def on_declare_winner(data):
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
+    
     user_id = data.get('user_id')
     winner_name = data.get('name', 'Player')
     card_num = data.get('card_num', '—')
     card_index = data.get('card_index', 0)
-    game_id = data.get('game_id', game_state.get('game_id'))
+    game_id = data.get('game_id', game.get('game_id'))
 
-    if game_state.get('winner_declared', False):
+    if game.get('winner_declared', False):
         return
-    game_state['winner_declared'] = True
+    game['winner_declared'] = True
 
-    if user_id not in game_state['ready_players']:
-        game_state['ready_players'][user_id] = {
+    if user_id not in game['ready_players']:
+        game['ready_players'][user_id] = {
             'name': winner_name,
             'cards': [],
             'card_num': card_num
         }
 
-    total_players = len(game_state['ready_players'])
+    total_players = len(game['ready_players'])
     prize = round(total_players * 10 * 0.8)
 
-    emit('winner_found', {
+    socketio.emit('winner_found', {
+        'room': room,
         'user_id': user_id,
         'winner_name': winner_name,
         'card_num': card_num,
@@ -1398,45 +1422,48 @@ def on_declare_winner(data):
         'prize': prize,
         'total_players': total_players,
         'game_id': game_id,
-    }, room='bingo_main')
+    }, room=f'bingo_room_{room}')
 
 
 @socketio.on('admin_manual_call')
 def on_admin_manual_call(data):
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
+    
     number = data.get('number')
     admin  = data.get('admin', 'admin')
     if not number or not isinstance(number, int) or number < 1 or number > 75:
         return
-    if number in game_state.get('called', []):
+    if number in game.get('called', []):
         return
-    game_state.setdefault('called', []).append(number)
-    game_state['current'] = number
-    emit('ball_called', {'number': number, 'manual': True, 'admin': admin}, room='bingo_main')
+    game.setdefault('called', []).append(number)
+    game['current'] = number
+    socketio.emit('ball_called', {'room': room, 'number': number, 'manual': True, 'admin': admin}, room=f'bingo_room_{room}')
 
 
 @socketio.on('set_max_winners')
 def on_set_max_winners(data):
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
     mx = data.get('max', 1)
-    game_state['max_winners'] = max(1, min(4, int(mx)))
-    emit('max_winners_updated', {'max': game_state['max_winners']}, room='bingo_main')
+    game['max_winners'] = max(1, min(4, int(mx)))
+    socketio.emit('max_winners_updated', {'room': room, 'max': game['max_winners']}, room=f'bingo_room_{room}')
 
 
 @socketio.on('admin_pause_game')
 def on_admin_pause_game(data):
-    game_state['paused'] = not game_state.get('paused', False)
-    emit('game_paused', {'paused': game_state['paused']}, room='bingo_main')
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
+    game['paused'] = not game.get('paused', False)
+    socketio.emit('game_paused', {'room': room, 'paused': game['paused']}, room=f'bingo_room_{room}')
 
 
 @socketio.on('admin_cancel_game')
 def on_admin_cancel_game(data):
-    game_state['running'] = False
-    game_state['called']  = []
-    game_state['current'] = None
-    game_state['ready_players'] = {}
-    game_state['winner_declared'] = False
-    game_state['winner_count'] = 0
-    game_state['timer_started_at'] = time_module.time()
-    emit('game_cancelled', {'reason': 'admin_cancelled'}, room='bingo_main')
+    room = data.get('room', '10')
+    game_states[room] = default_game_state() # Reset the room
+    game_states[room]['timer_started_at'] = time_module.time()
+    socketio.emit('game_cancelled', {'room': room, 'reason': 'admin_cancelled'}, room=f'bingo_room_{room}')
 
 
 def generate_game_id():
@@ -1479,7 +1506,7 @@ def api_balance():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found. Please register in bot first.'}), 404
 
-    # ✅ MongoDB Fix: Use get_user_full instead of get_cursor
+    # ✅ MongoDB Fix
     user_data = db.get_user_full(user_id)
     status = user_data.get('status', 'active') if user_data else 'active'
     is_vip = user_data.get('is_vip', 0) if user_data else 0
@@ -1510,7 +1537,7 @@ def api_bet():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    # ✅ MongoDB Fix: Use get_user_full instead of get_cursor
+    # ✅ MongoDB Fix
     user_data = db.get_user_full(user_id)
     status = user_data.get('status', 'active') if user_data else 'active'
     if status == 'banned':
@@ -1547,7 +1574,7 @@ def api_win():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    # ✅ MongoDB Fix: Use get_user_full instead of get_cursor
+    # ✅ MongoDB Fix
     user_data = db.get_user_full(user_id)
     status = user_data.get('status', 'active') if user_data else 'active'
     if status == 'banned':
@@ -1588,25 +1615,28 @@ def api_game_played():
 
 @flask_app.route('/api/game_state', methods=['GET', 'OPTIONS'])
 def api_game_state():
+    room = request.args.get('room', '10')
+    game = game_states.get(room, default_game_state())
     now = time_module.time()
     time_left = 35
 
-    if not game_state['running']:
-        if game_state['timer_started_at']:
-            elapsed = int(now - game_state['timer_started_at'])
+    if not game['running']:
+        if game['timer_started_at']:
+            elapsed = int(now - game['timer_started_at'])
             time_left = max(0, 35 - elapsed)
             if time_left == 0:
-                game_state['running'] = True
-                game_state['started_at'] = now
+                game['running'] = True
+                game['started_at'] = now
         else:
-            game_state['timer_started_at'] = now
+            game['timer_started_at'] = now
             time_left = 35
 
     return jsonify({
-        'game_running': game_state['running'],
-        'game_id': game_state['game_id'],
+        'room': room,
+        'game_running': game['running'],
+        'game_id': game['game_id'],
         'time_left': time_left,
-        'total_players': len(game_state.get('ready_players', {})),
+        'total_players': len(game.get('ready_players', {})),
     })
 
 
@@ -1615,13 +1645,15 @@ def api_start_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
     data = request.json or {}
-    game_state['running'] = True
-    game_state['game_id'] = data.get('game_id', '')
-    game_state['started_at'] = time_module.time()
-    game_state['timer_started_at'] = None
-    game_state['total_players'] = 0
-    game_state['ready_players'] = {}
-    game_state['winner_declared'] = False
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
+    game['running'] = True
+    game['game_id'] = data.get('game_id', '')
+    game['started_at'] = time_module.time()
+    game['timer_started_at'] = None
+    game['total_players'] = 0
+    game['ready_players'] = {}
+    game['winner_declared'] = False
     return jsonify({'success': True})
 
 
@@ -1629,13 +1661,10 @@ def api_start_game():
 def api_end_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
-    game_state['running'] = False
-    game_state['game_id'] = None
-    game_state['started_at'] = None
-    game_state['timer_started_at'] = time_module.time()
-    game_state['total_players'] = 0
-    game_state['ready_players'] = {}
-    game_state['winner_declared'] = False
+    data = request.json or {}
+    room = data.get('room', '10')
+    game_states[room] = default_game_state()
+    game_states[room]['timer_started_at'] = time_module.time()
     return jsonify({'success': True})
 
 
@@ -1645,7 +1674,7 @@ def api_profile_stats():
     if not user_id or not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    # ✅ MongoDB Fix: Use get_user_full instead of get_cursor
+    # ✅ MongoDB Fix
     user_data = db.get_user_full(user_id)
     is_vip = user_data.get('is_vip', 0) if user_data else 0
 
@@ -1726,8 +1755,8 @@ def api_admin_dashboard():
         return jsonify({'success': True}), 200
     try:
         stats = db.get_dashboard_stats()
-        stats['active_online'] = len(game_state.get('ready_players', {}))
-        stats['running_games'] = 1 if game_state.get('running') else 0
+        stats['active_online'] = sum(len(g.get('ready_players', {})) for g in game_states.values())
+        stats['running_games'] = sum(1 for g in game_states.values() if g.get('running'))
         stats['success'] = True
         return jsonify(stats)
     except Exception as e:
@@ -1940,7 +1969,7 @@ def api_freeze_user():
         return jsonify({'success': True}), 200
     data = request.json or {}
     user_id = data.get('user_id')
-    # ✅ MongoDB Fix: Use db.freeze_user instead of get_cursor
+    # ✅ MongoDB Fix
     db.freeze_user(user_id)
     return jsonify({'success': True})
 
@@ -1951,7 +1980,7 @@ def api_unfreeze_user():
         return jsonify({'success': True}), 200
     data = request.json or {}
     user_id = data.get('user_id')
-    # ✅ MongoDB Fix: Use db.unfreeze_user instead of get_cursor
+    # ✅ MongoDB Fix
     db.unfreeze_user(user_id)
     return jsonify({'success': True})
 
@@ -1970,15 +1999,17 @@ def api_manual_call():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
     data   = request.json or {}
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
     number = data.get('number')
     if not number or number < 1 or number > 75:
         return jsonify({'success': False, 'error': 'Invalid number'}), 400
-    if number in game_state.get('called', []):
+    if number in game.get('called', []):
         return jsonify({'success': False, 'error': 'Already called'}), 400
-    game_state.setdefault('called', []).append(number)
-    game_state['current'] = number
-    socketio.emit('ball_called', {'number': number, 'manual': True}, room='bingo_main')
-    return jsonify({'success': True, 'number': number})
+    game.setdefault('called', []).append(number)
+    game['current'] = number
+    socketio.emit('ball_called', {'room': room, 'number': number, 'manual': True}, room=f'bingo_room_{room}')
+    return jsonify({'success': True, 'number': number, 'room': room})
 
 
 @flask_app.route('/api/admin/set_max_winners', methods=['POST', 'OPTIONS'])
@@ -1986,32 +2017,36 @@ def api_set_max_winners():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
     data = request.json or {}
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
     mx = max(1, min(4, int(data.get('max_winners', 1))))
-    game_state['max_winners'] = mx
-    socketio.emit('max_winners_updated', {'max': mx}, room='bingo_main')
-    return jsonify({'success': True, 'max_winners': mx})
+    game['max_winners'] = mx
+    socketio.emit('max_winners_updated', {'room': room, 'max': mx}, room=f'bingo_room_{room}')
+    return jsonify({'success': True, 'max_winners': mx, 'room': room})
 
 
 @flask_app.route('/api/admin/pause_game', methods=['POST', 'OPTIONS'])
 def api_pause_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
-    game_state['paused'] = not game_state.get('paused', False)
-    socketio.emit('game_paused', {'paused': game_state['paused']}, room='bingo_main')
-    return jsonify({'success': True, 'paused': game_state['paused']})
+    data = request.json or {}
+    room = data.get('room', '10')
+    game = game_states.get(room, default_game_state())
+    game['paused'] = not game.get('paused', False)
+    socketio.emit('game_paused', {'room': room, 'paused': game['paused']}, room=f'bingo_room_{room}')
+    return jsonify({'success': True, 'paused': game['paused'], 'room': room})
 
 
 @flask_app.route('/api/admin/cancel_game', methods=['POST', 'OPTIONS'])
 def api_cancel_game():
     if request.method == 'OPTIONS':
         return jsonify({'success': True}), 200
-    game_state['running'] = False
-    game_state['called']  = []
-    game_state['ready_players'] = {}
-    game_state['winner_declared'] = False
-    game_state['timer_started_at'] = time_module.time()
-    socketio.emit('game_cancelled', {'reason': 'admin_cancelled'}, room='bingo_main')
-    return jsonify({'success': True})
+    data = request.json or {}
+    room = data.get('room', '10')
+    game_states[room] = default_game_state()
+    game_states[room]['timer_started_at'] = time_module.time()
+    socketio.emit('game_cancelled', {'room': room, 'reason': 'admin_cancelled'}, room=f'bingo_room_{room}')
+    return jsonify({'success': True, 'room': room})
 
 
 @flask_app.route('/api/admin/rankings', methods=['GET', 'OPTIONS'])
@@ -2119,5 +2154,5 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
-print("✅ Bot is running with Telebirr SMS verification + Full Mini App API + Admin Panel + MongoDB Cloud...")
+print("✅ Bot is running with Multi-Room SocketIO + MongoDB Cloud...")
 app.run_polling()
