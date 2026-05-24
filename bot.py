@@ -81,24 +81,17 @@ ADMIN_CREDENTIALS = {
 MERCHANT_PHONE = "0998480054"
 
 def get_merchant_phone_partials():
-    """
-    Returns all possible masked formats Telebirr uses for 0998480054:
-    - Local format:       0998****54
-    - International fmt:  2519****0054
-    """
-    p = MERCHANT_PHONE  # 0998480054
-    local_partial = p[:4] + "****" + p[-2:]           # 0998****54
-    intl = "251" + p[1:]                               # 251998480054
-    intl_partial = intl[:4] + "****" + intl[-4:]       # 2519****0054
+    p = MERCHANT_PHONE
+    local_partial = p[:4] + "****" + p[-2:]
+    intl = "251" + p[1:]
+    intl_partial = intl[:4] + "****" + intl[-4:]
     return [local_partial, intl_partial]
 
 def _is_transaction_used(transaction_id: str) -> bool:
-    """Check if telebirr transaction ID was already used — uses MongoDB."""
     from db import db as mongo_db
     return mongo_db["telebirr_transactions"].find_one({"transaction_id": transaction_id}) is not None
 
 def _mark_transaction_used(transaction_id: str, user_id: int, amount: float):
-    """Save telebirr transaction ID to prevent reuse — uses MongoDB."""
     from db import db as mongo_db
     from datetime import datetime
     mongo_db["telebirr_transactions"].update_one(
@@ -109,8 +102,6 @@ def _mark_transaction_used(transaction_id: str, user_id: int, amount: float):
 
 def verify_telebirr_sms(sms_text: str, expected_amount: int) -> dict:
     sms_text = sms_text.strip()
-
-    # Must be a real Telebirr transfer SMS
     if "transferred ETB" not in sms_text:
         return {
             'valid': False,
@@ -121,21 +112,14 @@ def verify_telebirr_sms(sms_text: str, expected_amount: int) -> dict:
                 "_Dear Habtamu You have transferred ETB 100.00 to ..._"
             )
         }
-
-    # Extract amount
     amount_match = re.search(r'transferred ETB\s*([\d,]+\.?\d*)', sms_text)
     if not amount_match:
         return {'valid': False, 'reason': "❌ Could not read amount from SMS. Please paste the full SMS."}
     amount = float(amount_match.group(1).replace(',', ''))
-
-    # Extract transaction ID
     txn_match = re.search(r'transaction number is\s*([A-Z0-9]+)', sms_text)
     if not txn_match:
         return {'valid': False, 'reason': "❌ Could not find transaction number in SMS. Please paste the full SMS."}
     transaction_id = txn_match.group(1).strip()
-
-    # Extract receiver partial phone — handles both formats:
-    # (0998****54) and (2519****0054)
     phone_match = re.search(r'\((\d{4}\*+\d{2,4})\)', sms_text)
     if phone_match:
         receiver_partial = phone_match.group(1)
@@ -149,13 +133,9 @@ def verify_telebirr_sms(sms_text: str, expected_amount: int) -> dict:
                     f"Please send to: `{MERCHANT_PHONE}`"
                 )
             }
-
-    # Extract date and time
     date_match = re.search(r'on\s*(\d{2}/\d{2}/\d{4})\s*(\d{2}:\d{2}:\d{2})', sms_text)
     date_str = date_match.group(1) if date_match else ''
     time_str = date_match.group(2) if date_match else ''
-
-    # Check amount matches (allow ±1 ETB tolerance)
     if abs(amount - expected_amount) > 1:
         return {
             'valid': False,
@@ -166,8 +146,6 @@ def verify_telebirr_sms(sms_text: str, expected_amount: int) -> dict:
                 f"Please make sure you send the exact amount."
             )
         }
-
-    # Check transaction not already used
     if _is_transaction_used(transaction_id):
         return {
             'valid': False,
@@ -177,7 +155,6 @@ def verify_telebirr_sms(sms_text: str, expected_amount: int) -> dict:
                 f"Each SMS can only be used once."
             )
         }
-
     return {
         'valid': True,
         'reason': 'OK',
@@ -798,7 +775,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
         amount = user_state.get(f"{user_id}_amount", 0)
         method = user_state.get(f"{user_id}_method", "Unknown")
 
-        # ── Back button ──
         if text == "🔙 Back":
             user_state[user_id] = "deposit_method"
             keyboard = ReplyKeyboardMarkup(
@@ -809,29 +785,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
             await update.message.reply_text(method_msg, reply_markup=keyboard)
             return
 
-        # Verify the SMS
         result = verify_telebirr_sms(sms_text=text, expected_amount=amount)
 
         if not result['valid']:
-            # Keep state so user can try again
             await update.message.reply_text(result['reason'], parse_mode="Markdown")
             return
 
-        # SMS is valid — credit the wallet
         transaction_id = result['transaction_id']
         confirmed_amount = int(result['amount'])
         bonus = int(confirmed_amount * 0.10)
         total = confirmed_amount + bonus
 
-        # Save transaction ID to prevent reuse
         _mark_transaction_used(transaction_id, user_id, confirmed_amount)
 
-        # Credit play wallet
         update_play_balance(user_id, total)
         add_transaction(user_id, "deposit", total)
         new_balance = get_play_balance(user_id)
 
-        # Referral bonus
         user = get_user(user_id)
         ref_by = user[4] if user and len(user) > 4 else None
         if ref_by:
@@ -878,12 +848,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
                 except:
                     pass
 
-        # Clear state
         user_state.pop(user_id, None)
         user_state.pop(f"{user_id}_amount", None)
         user_state.pop(f"{user_id}_method", None)
 
-        # Notify admins
         for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_message(
@@ -901,7 +869,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
             except:
                 pass
 
-        # Success message to user
         await update.message.reply_text(
             t('deposit_success', lang,
               method=method,
@@ -1512,17 +1479,10 @@ def api_balance():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found. Please register in bot first.'}), 404
 
-    status = 'active'
-    is_vip = 0
-    try:
-        cur = get_cursor()
-        cur.execute("SELECT status, is_vip FROM users WHERE user_id=?", (user_id,))
-        row = cur.fetchone()
-        if row:
-            status = row[0] or 'active'
-            is_vip = row[1] or 0
-    except Exception:
-        pass
+    # ✅ MongoDB Fix: Use get_user_full instead of get_cursor
+    user_data = db.get_user_full(user_id)
+    status = user_data.get('status', 'active') if user_data else 'active'
+    is_vip = user_data.get('is_vip', 0) if user_data else 0
 
     return jsonify({
         'success': True,
@@ -1550,16 +1510,13 @@ def api_bet():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    try:
-        cur = get_cursor()
-        cur.execute("SELECT status FROM users WHERE user_id=?", (user_id,))
-        row = cur.fetchone()
-        if row and row[0] == 'banned':
-            return jsonify({'success': False, 'error': 'Account banned. Contact support.'}), 403
-        if row and row[0] == 'frozen':
-            return jsonify({'success': False, 'error': 'Account frozen. Contact support.'}), 403
-    except Exception:
-        pass
+    # ✅ MongoDB Fix: Use get_user_full instead of get_cursor
+    user_data = db.get_user_full(user_id)
+    status = user_data.get('status', 'active') if user_data else 'active'
+    if status == 'banned':
+        return jsonify({'success': False, 'error': 'Account banned. Contact support.'}), 403
+    if status == 'frozen':
+        return jsonify({'success': False, 'error': 'Account frozen. Contact support.'}), 403
 
     success = deduct_bet_smart(user_id, amount)
     if not success:
@@ -1590,16 +1547,13 @@ def api_win():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    try:
-        cur = get_cursor()
-        cur.execute("SELECT status FROM users WHERE user_id=?", (user_id,))
-        row = cur.fetchone()
-        if row and row[0] == 'banned':
-            return jsonify({'success': False, 'error': 'Account banned'}), 403
-        if row and row[0] == 'frozen':
-            return jsonify({'success': False, 'error': 'Account frozen'}), 403
-    except Exception:
-        pass
+    # ✅ MongoDB Fix: Use get_user_full instead of get_cursor
+    user_data = db.get_user_full(user_id)
+    status = user_data.get('status', 'active') if user_data else 'active'
+    if status == 'banned':
+        return jsonify({'success': False, 'error': 'Account banned'}), 403
+    if status == 'frozen':
+        return jsonify({'success': False, 'error': 'Account frozen'}), 403
 
     update_main_balance(user_id, amount)
     add_transaction(user_id, 'bingo_win', amount)
@@ -1691,14 +1645,9 @@ def api_profile_stats():
     if not user_id or not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    is_vip = 0
-    try:
-        cur = get_cursor()
-        cur.execute("SELECT is_vip FROM users WHERE user_id=?", (user_id,))
-        row = cur.fetchone()
-        if row: is_vip = row[0] or 0
-    except Exception:
-        pass
+    # ✅ MongoDB Fix: Use get_user_full instead of get_cursor
+    user_data = db.get_user_full(user_id)
+    is_vip = user_data.get('is_vip', 0) if user_data else 0
 
     return jsonify({
         'success': True,
@@ -1991,9 +1940,8 @@ def api_freeze_user():
         return jsonify({'success': True}), 200
     data = request.json or {}
     user_id = data.get('user_id')
-    cur = db.get_cursor()
-    cur.execute("UPDATE users SET status='frozen' WHERE user_id=?", (user_id,))
-    db.conn.commit()
+    # ✅ MongoDB Fix: Use db.freeze_user instead of get_cursor
+    db.freeze_user(user_id)
     return jsonify({'success': True})
 
 
@@ -2003,9 +1951,8 @@ def api_unfreeze_user():
         return jsonify({'success': True}), 200
     data = request.json or {}
     user_id = data.get('user_id')
-    cur = db.get_cursor()
-    cur.execute("UPDATE users SET status='active' WHERE user_id=?", (user_id,))
-    db.conn.commit()
+    # ✅ MongoDB Fix: Use db.unfreeze_user instead of get_cursor
+    db.unfreeze_user(user_id)
     return jsonify({'success': True})
 
 
@@ -2172,5 +2119,5 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
-print("✅ Bot is running with Telebirr SMS verification + Full Mini App API + Admin Panel...")
+print("✅ Bot is running with Telebirr SMS verification + Full Mini App API + Admin Panel + MongoDB Cloud...")
 app.run_polling()
