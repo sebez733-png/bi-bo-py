@@ -928,9 +928,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
               bonus=bonus,
               total=total,
               new_balance=new_balance),
-            reply_markup=get_inline_menu(lang)
+            reply_markup=get_main_menu(lang)
         )
-        await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
         return
 
     # TRANSFER FEATURE
