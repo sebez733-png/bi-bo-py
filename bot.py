@@ -6,7 +6,6 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
 import re
-import sqlite3
 import db
 
 from db import (
@@ -93,38 +92,20 @@ def get_merchant_phone_partials():
     intl_partial = intl[:4] + "****" + intl[-4:]       # 2519****0054
     return [local_partial, intl_partial]
 
-def _init_txn_table():
-    conn = sqlite3.connect("bot_data.db")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS telebirr_transactions (
-            transaction_id TEXT PRIMARY KEY,
-            user_id        INTEGER NOT NULL,
-            amount         REAL NOT NULL,
-            created_at     TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
 def _is_transaction_used(transaction_id: str) -> bool:
-    _init_txn_table()
-    conn = sqlite3.connect("bot_data.db")
-    row = conn.execute(
-        "SELECT 1 FROM telebirr_transactions WHERE transaction_id=?",
-        (transaction_id,)
-    ).fetchone()
-    conn.close()
-    return row is not None
+    """Check if telebirr transaction ID was already used — uses MongoDB."""
+    from db import db as mongo_db
+    return mongo_db["telebirr_transactions"].find_one({"transaction_id": transaction_id}) is not None
 
 def _mark_transaction_used(transaction_id: str, user_id: int, amount: float):
-    _init_txn_table()
-    conn = sqlite3.connect("bot_data.db")
-    conn.execute(
-        "INSERT OR IGNORE INTO telebirr_transactions (transaction_id, user_id, amount) VALUES (?,?,?)",
-        (transaction_id, user_id, amount)
+    """Save telebirr transaction ID to prevent reuse — uses MongoDB."""
+    from db import db as mongo_db
+    from datetime import datetime
+    mongo_db["telebirr_transactions"].update_one(
+        {"transaction_id": transaction_id},
+        {"$setOnInsert": {"transaction_id": transaction_id, "user_id": user_id, "amount": amount, "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}},
+        upsert=True
     )
-    conn.commit()
-    conn.close()
 
 def verify_telebirr_sms(sms_text: str, expected_amount: int) -> dict:
     sms_text = sms_text.strip()
