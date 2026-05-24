@@ -5,6 +5,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
+import re
+import sqlite3
 import db
 
 from db import (
@@ -69,11 +71,131 @@ BOT_USERNAME = "adwabingiobot"
 ADMIN_IDS = [7627811244, 1119881250]
 MINI_APP_URL = "https://sebez733-png.github.io/bingio-mini-app/"
 
-# ── ADMIN PANEL CREDENTIALS ──
 ADMIN_CREDENTIALS = {
     'superadmin': {'password': 'admin123', 'role': 'super'},
     'admin1':     {'password': 'pass123',  'role': 'regular'},
 }
+
+# --------------------------
+# TELEBIRR SMS VERIFICATION
+# --------------------------
+MERCHANT_PHONE = "0998480054"
+
+def get_merchant_phone_partial():
+    p = MERCHANT_PHONE
+    return p[:4] + "****" + p[-2:]
+
+def _init_txn_table():
+    conn = sqlite3.connect("bot_data.db")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS telebirr_transactions (
+            transaction_id TEXT PRIMARY KEY,
+            user_id        INTEGER NOT NULL,
+            amount         REAL NOT NULL,
+            created_at     TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def _is_transaction_used(transaction_id: str) -> bool:
+    _init_txn_table()
+    conn = sqlite3.connect("bot_data.db")
+    row = conn.execute(
+        "SELECT 1 FROM telebirr_transactions WHERE transaction_id=?",
+        (transaction_id,)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+def _mark_transaction_used(transaction_id: str, user_id: int, amount: float):
+    _init_txn_table()
+    conn = sqlite3.connect("bot_data.db")
+    conn.execute(
+        "INSERT OR IGNORE INTO telebirr_transactions (transaction_id, user_id, amount) VALUES (?,?,?)",
+        (transaction_id, user_id, amount)
+    )
+    conn.commit()
+    conn.close()
+
+def verify_telebirr_sms(sms_text: str, expected_amount: int) -> dict:
+    sms_text = sms_text.strip()
+
+    # Must be a real Telebirr transfer SMS
+    if "transferred ETB" not in sms_text:
+        return {
+            'valid': False,
+            'reason': (
+                "❌ SMS format not recognized.\n\n"
+                "Please paste the *exact* SMS you received from Telebirr after sending money.\n\n"
+                "Example:\n"
+                "_Dear Habtamu You have transferred ETB 100.00 to ..._"
+            )
+        }
+
+    # Extract amount
+    amount_match = re.search(r'transferred ETB\s*([\d,]+\.?\d*)', sms_text)
+    if not amount_match:
+        return {'valid': False, 'reason': "❌ Could not read amount from SMS. Please paste the full SMS."}
+    amount = float(amount_match.group(1).replace(',', ''))
+
+    # Extract transaction ID
+    txn_match = re.search(r'transaction number is\s*([A-Z0-9]+)', sms_text)
+    if not txn_match:
+        return {'valid': False, 'reason': "❌ Could not find transaction number in SMS. Please paste the full SMS."}
+    transaction_id = txn_match.group(1).strip()
+
+    # Extract receiver partial phone
+    phone_match = re.search(r'\((\d{4}\*+\d{2,4})\)', sms_text)
+    if phone_match:
+        receiver_partial = phone_match.group(1)
+        expected_partial = get_merchant_phone_partial()
+        if receiver_partial != expected_partial:
+            return {
+                'valid': False,
+                'reason': (
+                    f"❌ Wrong recipient!\n\n"
+                    f"Money was not sent to our account.\n"
+                    f"Please send to: `{MERCHANT_PHONE}`"
+                )
+            }
+
+    # Extract date and time
+    date_match = re.search(r'on\s*(\d{2}/\d{2}/\d{4})\s*(\d{2}:\d{2}:\d{2})', sms_text)
+    date_str = date_match.group(1) if date_match else ''
+    time_str = date_match.group(2) if date_match else ''
+
+    # Check amount matches (allow ±1 ETB tolerance)
+    if abs(amount - expected_amount) > 1:
+        return {
+            'valid': False,
+            'reason': (
+                f"❌ Amount mismatch!\n\n"
+                f"You said you'd send *{expected_amount} ETB* "
+                f"but SMS shows *{amount:.2f} ETB*.\n\n"
+                f"Please make sure you send the exact amount."
+            )
+        }
+
+    # Check transaction not already used
+    if _is_transaction_used(transaction_id):
+        return {
+            'valid': False,
+            'reason': (
+                f"❌ Transaction already used!\n\n"
+                f"Transaction `{transaction_id}` was already submitted.\n"
+                f"Each SMS can only be used once."
+            )
+        }
+
+    return {
+        'valid': True,
+        'reason': 'OK',
+        'transaction_id': transaction_id,
+        'amount': amount,
+        'date': date_str,
+        'time': time_str,
+    }
 
 # --------------------------
 # STATE & COUNTERS
@@ -83,7 +205,7 @@ request_counter = 0
 withdraw_requests = {}
 
 # --------------------------
-# SHARED GAME STATE (for sync across all users)
+# SHARED GAME STATE
 # --------------------------
 game_state = {
     'running': False,
@@ -94,11 +216,11 @@ game_state = {
     'timer_started_at': None,
     'total_players': 0,
     'total_pot': 0,
-    'ready_players': {},      # Tracks who paid and is playing
-    'winner_declared': False, # Prevents multiple winners per round
-    'max_winners': 1,         # ✅ ADMIN: Max winners per round
-    'winner_count': 0,        # ✅ ADMIN: Current winner count
-    'paused': False,          # ✅ ADMIN: Game pause state
+    'ready_players': {},
+    'winner_declared': False,
+    'max_winners': 1,
+    'winner_count': 0,
+    'paused': False,
 }
 
 # --------------------------
@@ -621,19 +743,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
         if lang == 'en':
             pay_msg = (
                 f"💳 Payment Instructions\n\n"
-                f"Send {amount} Birr to:\n\n"
+                f"Send *{amount} Birr* to:\n\n"
                 f"🏦 Method: {method}\n"
                 f"📱 Phone:\n`{phone}`\n\n"
-                f"ℹ️ After sending the money, copy the entire confirmation message from {method} and paste it here 👇👇👇"
+                f"ℹ️ After sending the money, copy the entire confirmation SMS from Telebirr and paste it here 👇"
             )
         else:
             pay_msg = (
                 f"💳 የክፍያ መመሪያ\n\n"
-                f"ወደዚህ {amount} ብር ይላኩ\n\n"
-                f"🏦 የክፍያ መንግድ: {method}\n"
+                f"ወደዚህ *{amount} ብር* ይላኩ\n\n"
+                f"🏦 የክፍያ መንገድ: {method}\n"
                 f"📱 ስልክ ቁጥር:\n`{phone}`\n\n"
-                f"ℹ️ ገንዘቡን ከላኩ በኋላ ከ{app_name_am} የተላከልዎትን ሙሉውን የማረጋገጫ መልእክት ኮፒ አድርገው እዚህ ላይ ፔስት አድርገው ይላኩ 👇👇👇\n\n"
-                f"ℹ️ After sending the money, copy and paste the entire confirmation message sent to you from {method} here 👇👇👇"
+                f"ℹ️ ገንዘቡን ከላኩ በኋላ ከ{app_name_am} የተላከልዎትን ሙሉውን የማረጋገጫ SMS ኮፒ አድርገው እዚህ ላይ ፔስት አድርገው ይላኩ 👇"
             )
         await update.message.reply_text(pay_msg, parse_mode="Markdown")
         return
@@ -678,42 +799,65 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
                 await context.bot.send_message(chat_id=admin_id, text=admin_msg)
             except:
                 pass
+        return
 
+    # ══════════════════════════════════════════
+    # ✅ DEPOSIT CONFIRM — SMS VERIFICATION
+    # ══════════════════════════════════════════
     if user_state.get(user_id) == "deposit_confirm":
         amount = user_state.get(f"{user_id}_amount", 0)
         method = user_state.get(f"{user_id}_method", "Unknown")
-        bonus = int(amount * 0.10)
-        total = amount + bonus
+
+        # Verify the SMS
+        result = verify_telebirr_sms(sms_text=text, expected_amount=amount)
+
+        if not result['valid']:
+            # Keep state so user can try again
+            await update.message.reply_text(result['reason'], parse_mode="Markdown")
+            return
+
+        # SMS is valid — credit the wallet
+        transaction_id = result['transaction_id']
+        confirmed_amount = int(result['amount'])
+        bonus = int(confirmed_amount * 0.10)
+        total = confirmed_amount + bonus
+
+        # Save transaction ID to prevent reuse
+        _mark_transaction_used(transaction_id, user_id, confirmed_amount)
+
+        # Credit play wallet
         update_play_balance(user_id, total)
         add_transaction(user_id, "deposit", total)
         new_balance = get_play_balance(user_id)
+
+        # Referral bonus
         user = get_user(user_id)
         ref_by = user[4] if user and len(user) > 4 else None
         if ref_by:
             if is_user_agent(int(ref_by)):
-                ref_bonus = int(amount * 0.10)
+                ref_bonus = int(confirmed_amount * 0.10)
                 update_main_balance(int(ref_by), ref_bonus)
                 try:
                     await context.bot.send_message(
                         chat_id=int(ref_by),
                         text=(
                             "🤝 Agent Cash Commission!\n\n"
-                            f"👤 Your referral made a deposit: {amount} ETB\n"
+                            f"👤 Your referral deposited: {confirmed_amount} ETB\n"
                             f"💰 You earned: {ref_bonus} ETB (10% Cash)\n\n"
-                            "💸 Added to your Main Wallet (Withdrawable)!"
+                            "💸 Added to your Main Wallet!"
                         )
                     )
                 except:
                     pass
             else:
-                ref_bonus = int(amount * 0.10)
+                ref_bonus = int(confirmed_amount * 0.10)
                 update_play_balance(int(ref_by), ref_bonus)
                 try:
                     await context.bot.send_message(
                         chat_id=int(ref_by),
                         text=(
-                            "🎉 Referral Deposit Bonus\n\n"
-                            f"👤 Your referral made a deposit: {amount} ETB\n"
+                            "🎉 Referral Deposit Bonus!\n\n"
+                            f"👤 Your referral deposited: {confirmed_amount} ETB\n"
                             f"💰 You earned: {ref_bonus} ETB (10%)\n\n"
                             "🙏 Keep inviting more friends!"
                         )
@@ -726,22 +870,44 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
                         chat_id=int(ref_by),
                         text=(
                             "🎉 Congratulations! You are now an Official Agent! 🤝\n\n"
-                            "You have successfully achieved all the requirements:\n"
-                            "✅ 30+ Invites\n"
-                            "✅ 20+ Referral Deposits\n"
-                            "✅ 3000+ ETB Total Referral Deposits\n\n"
-                            "🎁 Your New Reward:\n"
-                            "From now on, all your invite bonuses will be 10% CASH added directly to your 💰 Main Wallet (Withdrawable)!\n\n"
-                            "🚀 Keep inviting more friends to earn more real cash!"
+                            "✅ 30+ Invites\n✅ 20+ Referral Deposits\n✅ 3000+ ETB Total\n\n"
+                            "🎁 From now on you earn 10% CASH to Main Wallet!"
                         )
                     )
                 except:
                     pass
+
+        # Clear state
         user_state.pop(user_id, None)
         user_state.pop(f"{user_id}_amount", None)
         user_state.pop(f"{user_id}_method", None)
+
+        # Notify admins
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=(
+                        f"✅ DEPOSIT VERIFIED\n\n"
+                        f"👤 User ID: {user_id}\n"
+                        f"💰 Amount: {confirmed_amount} ETB\n"
+                        f"🎁 Bonus: {bonus} ETB\n"
+                        f"📈 Total: {total} ETB\n"
+                        f"🔖 TXN: {transaction_id}\n"
+                        f"📅 {result.get('date', '')} {result.get('time', '')}"
+                    )
+                )
+            except:
+                pass
+
+        # Success message to user
         await update.message.reply_text(
-            t('deposit_success', lang, method=method, amount=amount, bonus=bonus, total=total, new_balance=new_balance),
+            t('deposit_success', lang,
+              method=method,
+              amount=confirmed_amount,
+              bonus=bonus,
+              total=total,
+              new_balance=new_balance),
             reply_markup=get_inline_menu(lang)
         )
         await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
@@ -1164,10 +1330,6 @@ def add_headers(response):
     return response
 
 
-# ==========================================
-# SOCKETIO EVENTS (Real-Time Game Sync)
-# ==========================================
-
 @socketio.on('connect')
 def on_connect():
     print(f'🔌 Client connected: {request.sid}')
@@ -1217,7 +1379,6 @@ def on_request_countdown(data):
 
 @socketio.on('player_ready')
 def on_player_ready(data):
-    """Player confirmed their card selection and bet was deducted."""
     user_id = data.get('user_id')
     name = data.get('name', 'Player')
     cards = data.get('cards', [])
@@ -1238,12 +1399,10 @@ def on_player_ready(data):
         'total_players': total,
         'player_name': name,
     }, room='bingo_main')
-    print(f'✅ Player ready: {name} ({user_id}), total: {total}')
 
 
 @socketio.on('declare_winner')
 def on_declare_winner(data):
-    """Client declares they have bingo — server validates and broadcasts."""
     user_id = data.get('user_id')
     winner_name = data.get('name', 'Player')
     card_num = data.get('card_num', '—')
@@ -1251,7 +1410,7 @@ def on_declare_winner(data):
     game_id = data.get('game_id', game_state.get('game_id'))
 
     if game_state.get('winner_declared', False):
-        return  # Already have a winner this round
+        return
     game_state['winner_declared'] = True
 
     if user_id not in game_state['ready_players']:
@@ -1264,8 +1423,6 @@ def on_declare_winner(data):
     total_players = len(game_state['ready_players'])
     prize = round(total_players * 10 * 0.8)
 
-    print(f'🏆 Winner declared: {winner_name} card #{card_num}, prize: {prize}')
-
     emit('winner_found', {
         'user_id': user_id,
         'winner_name': winner_name,
@@ -1277,13 +1434,8 @@ def on_declare_winner(data):
     }, room='bingo_main')
 
 
-# ══════════════════════════════════════════════════════════
-# ✅ ADMIN SOCKET EVENTS
-# ══════════════════════════════════════════════════════════
-
 @socketio.on('admin_manual_call')
 def on_admin_manual_call(data):
-    """Admin manually calls a specific number."""
     number = data.get('number')
     admin  = data.get('admin', 'admin')
     if not number or not isinstance(number, int) or number < 1 or number > 75:
@@ -1292,13 +1444,11 @@ def on_admin_manual_call(data):
         return
     game_state.setdefault('called', []).append(number)
     game_state['current'] = number
-    print(f"📞 Admin {admin} manually called: {number}")
     emit('ball_called', {'number': number, 'manual': True, 'admin': admin}, room='bingo_main')
 
 
 @socketio.on('set_max_winners')
 def on_set_max_winners(data):
-    """Admin sets max winners for next round."""
     mx = data.get('max', 1)
     game_state['max_winners'] = max(1, min(4, int(mx)))
     emit('max_winners_updated', {'max': game_state['max_winners']}, room='bingo_main')
@@ -1306,14 +1456,12 @@ def on_set_max_winners(data):
 
 @socketio.on('admin_pause_game')
 def on_admin_pause_game(data):
-    """Admin pauses/resumes the game."""
     game_state['paused'] = not game_state.get('paused', False)
     emit('game_paused', {'paused': game_state['paused']}, room='bingo_main')
 
 
 @socketio.on('admin_cancel_game')
 def on_admin_cancel_game(data):
-    """Admin cancels current game."""
     game_state['running'] = False
     game_state['called']  = []
     game_state['current'] = None
@@ -1330,7 +1478,7 @@ def generate_game_id():
 
 
 # ==========================================
-# EXISTING FLASK API ROUTES
+# FLASK API ROUTES
 # ==========================================
 
 @flask_app.route('/api/ping', methods=['GET', 'OPTIONS'])
@@ -1364,7 +1512,6 @@ def api_balance():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found. Please register in bot first.'}), 404
 
-    # ✅ Safe status check with fallback
     status = 'active'
     is_vip = 0
     try:
@@ -1375,7 +1522,7 @@ def api_balance():
             status = row[0] or 'active'
             is_vip = row[1] or 0
     except Exception:
-        pass  # If column doesn't exist, default to active
+        pass
 
     return jsonify({
         'success': True,
@@ -1403,7 +1550,6 @@ def api_bet():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    # ✅ CHECK IF BANNED OR FROZEN (Safe with try/except)
     try:
         cur = get_cursor()
         cur.execute("SELECT status FROM users WHERE user_id=?", (user_id,))
@@ -1413,7 +1559,7 @@ def api_bet():
         if row and row[0] == 'frozen':
             return jsonify({'success': False, 'error': 'Account frozen. Contact support.'}), 403
     except Exception:
-        pass  # If status column missing, allow the bet
+        pass
 
     success = deduct_bet_smart(user_id, amount)
     if not success:
@@ -1444,7 +1590,6 @@ def api_win():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    # ✅ CHECK IF BANNED OR FROZEN (Safe with try/except)
     try:
         cur = get_cursor()
         cur.execute("SELECT status FROM users WHERE user_id=?", (user_id,))
@@ -1485,7 +1630,8 @@ def api_game_played():
         return jsonify({'success': False, 'error': 'User not found'}), 404
     add_game_session(user_id, game_id, cards, entry)
     return jsonify({'success': True})
- 
+
+
 @flask_app.route('/api/game_state', methods=['GET', 'OPTIONS'])
 def api_game_state():
     now = time_module.time()
@@ -1545,7 +1691,6 @@ def api_profile_stats():
     if not user_id or not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    # ✅ Safely check if user is VIP
     is_vip = 0
     try:
         cur = get_cursor()
@@ -1574,13 +1719,7 @@ def api_game_history():
     history = []
     for row in rows:
         game_id, entry, status, result, ts = row
-        history.append({
-            'game_id': game_id,
-            'entry': entry,
-            'status': status,
-            'result': result,
-            'time': ts
-        })
+        history.append({'game_id': game_id, 'entry': entry, 'status': status, 'result': result, 'time': ts})
     return jsonify({'success': True, 'history': history})
 
 
@@ -1593,12 +1732,7 @@ def api_transactions():
     txs = []
     for row in rows:
         tx_type, amount, status, ts = row
-        txs.append({
-            'type': tx_type,
-            'amount': amount,
-            'status': status,
-            'time': ts
-        })
+        txs.append({'type': tx_type, 'amount': amount, 'status': status, 'time': ts})
     return jsonify({'success': True, 'transactions': txs})
 
 
@@ -1606,7 +1740,6 @@ def api_transactions():
 def api_top_winners():
     period = request.args.get('period', 'week')
     category = request.args.get('category', 'deposit')
-
     if category == 'deposit':
         rows = get_top_by_deposit(period, 30)
     elif category == 'invite':
@@ -1615,13 +1748,11 @@ def api_top_winners():
         rows = get_top_by_wins(period, 30)
     else:
         rows = get_top_by_games(period, 30)
-
     winners = []
     for row in rows:
         uid, first_name, value = row
         name = first_name if first_name and first_name.strip() else 'User'
         winners.append({'name': name, 'value': value})
-
     return jsonify({'success': True, 'winners': winners})
 
 
@@ -1635,8 +1766,9 @@ def api_my_rank():
     rank, value = get_user_rank(user_id, period, category)
     return jsonify({'success': True, 'rank': rank, 'value': value})
 
+
 # ══════════════════════════════════════════════════════════
-# ✅ ADMIN FLASK ROUTES
+# ADMIN FLASK ROUTES
 # ══════════════════════════════════════════════════════════
 
 @flask_app.route('/api/admin/dashboard', methods=['GET', 'OPTIONS'])
@@ -1714,12 +1846,8 @@ def api_approve_withdrawal():
     withdrawal_id = data.get('withdrawal_id')
     user_id       = data.get('user_id')
     amount        = data.get('amount', 0)
-    
-    # DEDUCT THE MONEY FROM USER'S MAIN WALLET
     db.update_main_balance(user_id, -amount)
     db.add_transaction(user_id, 'withdraw', amount)
-    
-    # ✅ SEND TELEGRAM MESSAGE TO USER
     try:
         import asyncio
         async def send_approval():
@@ -1727,12 +1855,10 @@ def api_approve_withdrawal():
         asyncio.run(send_approval())
     except Exception as e:
         print(f"Failed to send approval message to user {user_id}: {e}")
-    
     if withdrawal_id in withdraw_requests:
         del withdraw_requests[withdrawal_id]
     else:
         db.approve_withdrawal(withdrawal_id)
-        
     return jsonify({'success': True})
 
 
@@ -1744,10 +1870,6 @@ def api_reject_withdrawal():
     withdrawal_id = data.get('withdrawal_id')
     user_id = data.get('user_id')
     amount = data.get('amount', 0)
-    
-    # NO REFUND NEEDED! The money was never deducted from their balance until approval.
-    
-    # ✅ SEND TELEGRAM MESSAGE TO USER
     try:
         import asyncio
         async def send_rejection():
@@ -1755,13 +1877,12 @@ def api_reject_withdrawal():
         asyncio.run(send_rejection())
     except Exception as e:
         print(f"Failed to send rejection message to user {user_id}: {e}")
-    
     if withdrawal_id in withdraw_requests:
         del withdraw_requests[withdrawal_id]
     else:
         db.reject_withdrawal(withdrawal_id)
-        
     return jsonify({'success': True})
+
 
 @flask_app.route('/api/admin/users', methods=['GET', 'OPTIONS'])
 def api_admin_users():
@@ -1845,6 +1966,7 @@ def api_remove_play_balance():
     db.add_transaction(user_id, 'admin_remove_play', amount)
     return jsonify({'success': True, 'main_balance': db.get_main_balance(user_id), 'play_balance': new_bal})
 
+
 @flask_app.route('/api/admin/ban_user', methods=['POST', 'OPTIONS'])
 def api_ban_user():
     if request.method == 'OPTIONS':
@@ -1863,7 +1985,6 @@ def api_unban_user():
     return jsonify({'success': True})
 
 
-# ✅ NEW: FREEZE & UNFREEZE ROUTES
 @flask_app.route('/api/admin/freeze_user', methods=['POST', 'OPTIONS'])
 def api_freeze_user():
     if request.method == 'OPTIONS':
@@ -1874,6 +1995,7 @@ def api_freeze_user():
     cur.execute("UPDATE users SET status='frozen' WHERE user_id=?", (user_id,))
     db.conn.commit()
     return jsonify({'success': True})
+
 
 @flask_app.route('/api/admin/unfreeze_user', methods=['POST', 'OPTIONS'])
 def api_unfreeze_user():
@@ -2050,5 +2172,5 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
-print("✅ Bot is running with full Mini App API + Admin Panel...")
+print("✅ Bot is running with Telebirr SMS verification + Full Mini App API + Admin Panel...")
 app.run_polling()
