@@ -2125,7 +2125,7 @@ def run_flask():
 # ✅ FIX 2: auto_call_loop now iterates over a snapshot of room IDs and
 # re-fetches the game state after sleep to avoid stale references after a reset.
 def auto_call_loop():
-    CALL_INTERVAL = 5  # Call a ball every 5 seconds
+    CALL_INTERVAL = 2  # Call a ball every 2 seconds
     while True:
         time_module.sleep(CALL_INTERVAL)
         for room_id in list(game_states.keys()):
