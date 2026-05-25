@@ -2132,6 +2132,23 @@ def auto_call_loop():
             game = game_states.get(room_id)
             if not game:
                 continue
+
+            # ✅ AUTO-START: When countdown expires, start the game on server
+            if not game['running'] and game.get('timer_started_at') and not game.get('winner_declared'):
+                elapsed = int(time_module.time() - game['timer_started_at'])
+                if elapsed >= 35:
+                    game['running'] = True
+                    game['started_at'] = time_module.time()
+                    game['timer_started_at'] = None
+                    game['winner_declared'] = False
+                    game['winner_count'] = 0
+                    socketio.emit('game_started', {
+                        'room': room_id,
+                        'game_id': game.get('game_id', ''),
+                        'total_players': count_total_cards(game)
+                    }, room=f'bingo_room_{room_id}')
+
+            # Call balls if game is running
             if game.get('running') and not game.get('paused') and not game.get('winner_declared'):
                 called = game.get('called', [])
                 if len(called) >= 75:
