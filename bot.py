@@ -776,9 +776,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
                 pass
         return
 
-    # ══════════════════════════════════════════
-    # ✅ DEPOSIT CONFIRM — SMS VERIFICATION
-    # ══════════════════════════════════════════
     if user_state.get(user_id) == "deposit_confirm":
         amount = user_state.get(f"{user_id}_amount", 0)
         method = user_state.get(f"{user_id}_method", "Unknown")
@@ -888,7 +885,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
         )
         return
 
-    # TRANSFER FEATURE
     if text in ["🔄 Transfer / ይላኩ", "🔄 Transfer"]:
         total_lifetime_deposits = get_total_deposits(user_id)
         if total_lifetime_deposits < 50:
@@ -1285,7 +1281,7 @@ async def cmd_agent(update, context): await handle_text(update, context, custom_
 
 
 # ==========================
-# FLASK API SERVER + SOCKETIO (MULTI-ROOM UPDATED)
+# FLASK API SERVER + SOCKETIO
 # ==========================
 flask_app = Flask(__name__)
 CORS(flask_app, resources={
@@ -1308,7 +1304,6 @@ def add_headers(response):
 @socketio.on('connect')
 def on_connect():
     print(f'🔌 Client connected: {request.sid}')
-    # Send state for both rooms so frontend can know what's available
     for room_id, game in game_states.items():
         time_left = 0
         if game['timer_started_at'] and not game['running']:
@@ -1364,7 +1359,7 @@ def on_request_countdown(data):
 def on_player_ready(data):
     room = data.get('room', '10')
     game = game_states.get(room, default_game_state())
-    
+
     user_id = data.get('user_id')
     name = data.get('name', 'Player')
     cards = data.get('cards', [])
@@ -1388,11 +1383,18 @@ def on_player_ready(data):
     }, room=f'bingo_room_{room}')
 
 
+# ✅ FIX 1: declare_winner now uses actual room stake instead of hardcoded 10
 @socketio.on('declare_winner')
 def on_declare_winner(data):
     room = data.get('room', '10')
     game = game_states.get(room, default_game_state())
-    
+
+    # Derive stake from room name: room '10' = 10 birr, room '20' = 20 birr
+    try:
+        stake = int(room)
+    except ValueError:
+        stake = 10  # safe fallback
+
     user_id = data.get('user_id')
     winner_name = data.get('name', 'Player')
     card_num = data.get('card_num', '—')
@@ -1411,7 +1413,9 @@ def on_declare_winner(data):
         }
 
     total_players = len(game['ready_players'])
-    prize = round(total_players * 10 * 0.8)
+
+    # ✅ FIX: use actual stake per room, not hardcoded 10
+    prize = round(total_players * stake * 0.8)
 
     socketio.emit('winner_found', {
         'room': room,
@@ -1429,7 +1433,7 @@ def on_declare_winner(data):
 def on_admin_manual_call(data):
     room = data.get('room', '10')
     game = game_states.get(room, default_game_state())
-    
+
     number = data.get('number')
     admin  = data.get('admin', 'admin')
     if not number or not isinstance(number, int) or number < 1 or number > 75:
@@ -1461,7 +1465,7 @@ def on_admin_pause_game(data):
 @socketio.on('admin_cancel_game')
 def on_admin_cancel_game(data):
     room = data.get('room', '10')
-    game_states[room] = default_game_state() # Reset the room
+    game_states[room] = default_game_state()
     game_states[room]['timer_started_at'] = time_module.time()
     socketio.emit('game_cancelled', {'room': room, 'reason': 'admin_cancelled'}, room=f'bingo_room_{room}')
 
@@ -1506,7 +1510,6 @@ def api_balance():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found. Please register in bot first.'}), 404
 
-    # ✅ MongoDB Fix
     user_data = db.get_user_full(user_id)
     status = user_data.get('status', 'active') if user_data else 'active'
     is_vip = user_data.get('is_vip', 0) if user_data else 0
@@ -1537,7 +1540,6 @@ def api_bet():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    # ✅ MongoDB Fix
     user_data = db.get_user_full(user_id)
     status = user_data.get('status', 'active') if user_data else 'active'
     if status == 'banned':
@@ -1574,7 +1576,6 @@ def api_win():
     if not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    # ✅ MongoDB Fix
     user_data = db.get_user_full(user_id)
     status = user_data.get('status', 'active') if user_data else 'active'
     if status == 'banned':
@@ -1674,7 +1675,6 @@ def api_profile_stats():
     if not user_id or not user_exists(user_id):
         return jsonify({'success': False, 'error': 'User not found'}), 404
 
-    # ✅ MongoDB Fix
     user_data = db.get_user_full(user_id)
     is_vip = user_data.get('is_vip', 0) if user_data else 0
 
@@ -1969,7 +1969,6 @@ def api_freeze_user():
         return jsonify({'success': True}), 200
     data = request.json or {}
     user_id = data.get('user_id')
-    # ✅ MongoDB Fix
     db.freeze_user(user_id)
     return jsonify({'success': True})
 
@@ -1980,7 +1979,6 @@ def api_unfreeze_user():
         return jsonify({'success': True}), 200
     data = request.json or {}
     user_id = data.get('user_id')
-    # ✅ MongoDB Fix
     db.unfreeze_user(user_id)
     return jsonify({'success': True})
 
