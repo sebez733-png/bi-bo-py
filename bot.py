@@ -177,22 +177,23 @@ withdraw_requests = {}
 # --------------------------
 COUNTDOWN_SECONDS = 35
 BALL_INTERVAL_SECONDS = 2
+MIN_PLAYERS = 2          # minimum unique players needed to start
+NEXT_ROUND_WAIT = 10     # seconds between game end and next countdown
 
 def default_game_state():
     return {
-        'phase': 'countdown',       # 'countdown' | 'playing' | 'ended'
-        'game_id': None,
+        'phase': 'countdown',        # 'countdown' | 'waiting_players' | 'playing' | 'ended'
+        'game_id': None,             # server-generated, NEVER changed by frontend
         'called': [],
         'current': None,
-        'countdown_end': None,      # epoch timestamp when countdown ends
+        'countdown_end': None,       # epoch float (seconds) when countdown ends
         'started_at': None,
-        'total_players': 0,
-        'ready_players': {},
+        'unique_players': {},        # {user_id: {name, cards, card_count}} — unique by user_id
         'winner_declared': False,
         'max_winners': 1,
         'winner_count': 0,
         'paused': False,
-        'timer_thread': None,       # server game loop thread
+        'timer_thread': None,
     }
 
 # Separate states for Room 10 and Room 20
@@ -212,46 +213,57 @@ room_locks = {
 # --------------------------
 
 def generate_game_id():
+    """Generate a unique game ID — only called server-side, never on frontend."""
     d = time_module.localtime()
-    return f"{d.tm_year}{d.tm_mon:02d}{d.tm_mday:02d}_{int(time_module.time() % 10000)}"
+    rand_suffix = random.randint(1000, 9999)
+    return f"G{d.tm_year}{d.tm_mon:02d}{d.tm_mday:02d}{d.tm_hour:02d}{d.tm_min:02d}{rand_suffix}"
+
+def get_unique_player_count(game):
+    """Count unique players (by user_id), not cards."""
+    return len(game['unique_players'])
+
+def get_total_cards(game):
+    """Count total cards purchased across all unique players."""
+    return sum(p.get('card_count', 1) for p in game['unique_players'].values())
 
 def start_room_game_loop(room):
     """
-    This is the master game loop for a room.
-    It runs in a background thread and drives:
-      1. Countdown phase (35s) — broadcasts time every second
-      2. Game phase — calls a ball every 2s until 75 balls or winner
-      3. After game ends — waits 12s then starts a new loop
+    Master server-authoritative game loop for one room.
+    Controls all phases: countdown → (check players) → playing → ended → next round
     """
     game = game_states[room]
     socket_room = f'bingo_room_{room}'
 
-    # ── PHASE 1: COUNTDOWN ──
+    # ── PHASE 1: COUNTDOWN (always fresh 35s) ──
     game['phase'] = 'countdown'
     game['called'] = []
     game['current'] = None
-    game['ready_players'] = {}
+    game['unique_players'] = {}
     game['winner_declared'] = False
     game['winner_count'] = 0
-    game['game_id'] = generate_game_id()
+    game['game_id'] = generate_game_id()   # single authoritative ID for this round
     game['countdown_end'] = time_module.time() + COUNTDOWN_SECONDS
 
     socketio.emit('countdown_start', {
         'room': room,
-        'game_id': game['game_id'],
+        'game_id': game['game_id'],          # frontend MUST use this ID
         'countdown_end': game['countdown_end'],
         'time_left': COUNTDOWN_SECONDS,
     }, room=socket_room)
 
-    # Tick every second during countdown
+    # Tick every second; extend if paused
     while True:
+        if game['phase'] not in ('countdown',):
+            break  # cancelled externally
+
+        if game.get('paused'):
+            # Extend the countdown_end by 1s so timer doesn't drain while paused
+            game['countdown_end'] += 1
+            time_module.sleep(1)
+            continue
+
         now = time_module.time()
         time_left = game['countdown_end'] - now
-
-        # Respect pause during countdown
-        if game.get('paused'):
-            time_module.sleep(0.5)
-            continue
 
         if time_left <= 0:
             break
@@ -260,13 +272,36 @@ def start_room_game_loop(room):
             'room': room,
             'game_id': game['game_id'],
             'time_left': max(0, int(time_left)),
+            'unique_players': get_unique_player_count(game),
+            'total_cards': get_total_cards(game),
         }, room=socket_room)
 
         time_module.sleep(1)
 
-    # ── PHASE 2: GAME RUNNING ──
+    if game['phase'] not in ('countdown',):
+        return  # cancelled — thread exits, cancel handler starts new loop
+
+    # ── CHECK MINIMUM PLAYERS ──
+    unique_count = get_unique_player_count(game)
+    if unique_count < MIN_PLAYERS:
+        # Not enough players — restart countdown immediately
+        socketio.emit('countdown_insufficient_players', {
+            'room': room,
+            'game_id': game['game_id'],
+            'unique_players': unique_count,
+            'required': MIN_PLAYERS,
+            'message': f'Need at least {MIN_PLAYERS} players. Only {unique_count} joined. Restarting...',
+        }, room=socket_room)
+        time_module.sleep(3)  # brief pause so players can read the message
+        # Restart — keep existing players so they don't lose their card selection
+        existing_players = dict(game['unique_players'])
+        game_states[room] = default_game_state()
+        game_states[room]['unique_players'] = existing_players  # carry over
+        start_room_loop_thread(room)
+        return
+
+    # ── PHASE 2: PLAYING ──
     if game.get('paused'):
-        # If paused at exactly 0, wait until unpaused
         while game.get('paused'):
             time_module.sleep(0.5)
 
@@ -275,20 +310,18 @@ def start_room_game_loop(room):
 
     socketio.emit('game_started', {
         'room': room,
-        'game_id': game['game_id'],
-        'total_players': len(game['ready_players']),
+        'game_id': game['game_id'],           # same ID — never changes mid-game
+        'unique_players': unique_count,
+        'total_cards': get_total_cards(game),
     }, room=socket_room)
 
-    # Call balls one by one
     ball_pool = list(range(1, 76))
     random.shuffle(ball_pool)
 
     for ball in ball_pool:
-        # Stop if winner declared or game ended/cancelled
         if game['phase'] != 'playing':
             break
 
-        # Wait while paused
         while game.get('paused') and game['phase'] == 'playing':
             time_module.sleep(0.5)
 
@@ -307,7 +340,6 @@ def start_room_game_loop(room):
             'game_id': game['game_id'],
         }, room=socket_room)
 
-        # Wait BALL_INTERVAL between balls, checking for pause/stop
         waited = 0
         while waited < BALL_INTERVAL_SECONDS:
             if game['phase'] != 'playing':
@@ -318,36 +350,35 @@ def start_room_game_loop(room):
             time_module.sleep(0.2)
             waited += 0.2
 
-        # Stop if winner declared
         if game['winner_declared']:
             break
 
     # ── PHASE 3: GAME ENDED ──
     if game['phase'] == 'playing':
-        # No winner declared — auto-end (all 75 balls called)
         game['phase'] = 'ended'
-        total_players = len(game['ready_players'])
-        prize = round(total_players * int(room) * 0.8)
+        unique_count = get_unique_player_count(game)
+        total_cards = get_total_cards(game)
+        prize = round(total_cards * int(room) * 0.8)
 
         socketio.emit('game_ended', {
             'room': room,
             'game_id': game['game_id'],
             'winners': [],
             'prize': prize,
-            'total_players': total_players,
+            'unique_players': unique_count,
+            'total_cards': total_cards,
         }, room=socket_room)
 
-    # Wait 12 seconds before starting the next round
-    time_module.sleep(12)
+    # ── WAIT then AUTO-START NEXT ROUND ──
+    time_module.sleep(NEXT_ROUND_WAIT)
 
-    # Reset and start new loop if no external stop
-    if game['phase'] in ('ended', 'playing'):
+    if game['phase'] in ('ended',):
         game_states[room] = default_game_state()
         start_room_loop_thread(room)
 
 
 def start_room_loop_thread(room):
-    """Start the game loop for a room in a daemon thread."""
+    """Start the game loop for a room in a fresh daemon thread."""
     t = threading.Thread(target=start_room_game_loop, args=(room,), daemon=True)
     game_states[room]['timer_thread'] = t
     t.start()
@@ -1461,19 +1492,19 @@ def add_headers(response):
 @socketio.on('connect')
 def on_connect():
     print(f'🔌 Client connected: {request.sid}')
-    # Send current state of all rooms immediately so user syncs on connect/reconnect
     for room_id, game in game_states.items():
         now = time_module.time()
         time_left = max(0, int(game['countdown_end'] - now)) if game.get('countdown_end') else 0
         emit('game_state_sync', {
             'room': room_id,
             'phase': game['phase'],
-            'game_id': game['game_id'],
+            'game_id': game['game_id'],          # authoritative server ID
             'countdown_end': game.get('countdown_end'),
             'time_left': time_left,
             'called_numbers': list(game.get('called', [])),
             'current_number': game.get('current'),
-            'total_players': len(game.get('ready_players', {})),
+            'unique_players': get_unique_player_count(game),
+            'total_cards': get_total_cards(game),
             'paused': game.get('paused', False),
         })
 
@@ -1491,19 +1522,19 @@ def on_join_room(data):
     sio_join_room(socket_room)
     print(f'👤 Player joined room: {socket_room}')
 
-    # Send current room state immediately to this new client
     game = game_states.get(room, default_game_state())
     now = time_module.time()
     time_left = max(0, int(game['countdown_end'] - now)) if game.get('countdown_end') else 0
     emit('game_state_sync', {
         'room': room,
         'phase': game['phase'],
-        'game_id': game['game_id'],
+        'game_id': game['game_id'],          # authoritative server ID
         'countdown_end': game.get('countdown_end'),
         'time_left': time_left,
         'called_numbers': list(game.get('called', [])),
         'current_number': game.get('current'),
-        'total_players': len(game.get('ready_players', {})),
+        'unique_players': get_unique_player_count(game),
+        'total_cards': get_total_cards(game),
         'paused': game.get('paused', False),
     })
 
@@ -1523,25 +1554,32 @@ def on_player_ready(data):
     if not game:
         return
 
-    user_id = data.get('user_id')
+    user_id = str(data.get('user_id', ''))
     name = data.get('name', 'Player')
-    cards = data.get('cards', [])
+    cards = data.get('cards', [])          # list of card numbers this player bought
     game_id = data.get('game_id')
 
-    # Only register if this is for the current game and in countdown phase
-    if game_id == game.get('game_id') and game['phase'] == 'countdown':
-        game['ready_players'][user_id] = {
-            'name': name,
-            'cards': cards,
-            'card_num': cards[0] if cards else '—',
-        }
-        total = len(game['ready_players'])
-        game['total_players'] = total
-        socketio.emit('player_joined', {
-            'room': room,
-            'total_players': total,
-            'player_name': name,
-        }, room=f'bingo_room_{room}')
+    # Only register if this is for the current game and still in countdown
+    if game_id != game.get('game_id') or game['phase'] != 'countdown':
+        return
+
+    # Store by user_id — prevents counting same player twice
+    game['unique_players'][user_id] = {
+        'name': name,
+        'cards': cards,
+        'card_count': len(cards),          # how many cards this player bought
+    }
+
+    unique_count = get_unique_player_count(game)
+    total_cards = get_total_cards(game)
+
+    # Broadcast updated counts to room — only counts, NOT card details (privacy)
+    socketio.emit('player_joined', {
+        'room': room,
+        'unique_players': unique_count,     # real unique user count
+        'total_cards': total_cards,         # total cards purchased
+        'player_name': name,
+    }, room=f'bingo_room_{room}')
 
 
 @socketio.on('declare_winner')
@@ -1557,15 +1595,21 @@ def on_declare_winner(data):
     game['winner_declared'] = True
     game['phase'] = 'ended'
 
-    user_id = data.get('user_id')
+    user_id = str(data.get('user_id', ''))
     winner_name = data.get('name', 'Player')
     card_num = data.get('card_num', '—')
     card_index = data.get('card_index', 0)
     game_id = data.get('game_id', game.get('game_id'))
 
-    total_players = max(len(game['ready_players']), 1)
+    # Ensure winner is in unique_players (add if missing, e.g. observer edge case)
+    if user_id not in game['unique_players']:
+        game['unique_players'][user_id] = {'name': winner_name, 'cards': [], 'card_count': 0}
+
+    unique_count = get_unique_player_count(game)
+    total_cards = get_total_cards(game)
     stake = int(room)
-    prize = round(total_players * stake * 0.8)
+    # Prize pool based on total cards purchased × stake × 80%
+    prize = round(total_cards * stake * 0.8)
 
     socketio.emit('winner_found', {
         'room': room,
@@ -1574,9 +1618,10 @@ def on_declare_winner(data):
         'card_num': card_num,
         'card_index': card_index,
         'prize': prize,
-        'total_players': total_players,
+        'unique_players': unique_count,
+        'total_cards': total_cards,
         'game_id': game_id,
-        'winners': [{'name': winner_name, 'cardNum': card_num}],
+        'winners': [{'name': winner_name, 'cardNum': card_num, 'user_id': user_id}],
     }, room=f'bingo_room_{room}')
 
 
@@ -1604,10 +1649,8 @@ def on_admin_pause_game(data):
 @socketio.on('admin_cancel_game')
 def on_admin_cancel_game(data):
     room = data.get('room', '10')
-    # Mark old game as ended so its loop thread will exit
     if game_states.get(room):
         game_states[room]['phase'] = 'cancelled'
-    # Create a fresh state and start a new loop
     game_states[room] = default_game_state()
     socketio.emit('game_cancelled', {'room': room, 'reason': 'admin_cancelled'}, room=f'bingo_room_{room}')
     start_room_loop_thread(room)
@@ -1783,10 +1826,11 @@ def api_game_state():
         'room': room,
         'phase': game['phase'],
         'game_running': game['phase'] == 'playing',
-        'game_id': game['game_id'],
+        'game_id': game['game_id'],               # always the server-authoritative ID
         'countdown_end': game.get('countdown_end'),
         'time_left': time_left,
-        'total_players': len(game.get('ready_players', {})),
+        'unique_players': get_unique_player_count(game),
+        'total_cards': get_total_cards(game),
         'called_numbers': list(game.get('called', [])),
         'current_number': game.get('current'),
         'paused': game.get('paused', False),
