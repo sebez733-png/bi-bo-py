@@ -194,8 +194,6 @@ def default_game_state():
     }
 
 # ✅ FIX 2: Helper function that ensures room exists in game_states dict
-# This fixes the Room 20 restart bug - game_states.get(room, default_game_state())
-# creates a temporary state that is never saved back to game_states!
 def get_game_state(room):
     """Get or create game state for a room, always persisted in game_states dict."""
     if room not in game_states:
@@ -209,7 +207,6 @@ game_states = {
 }
 
 # ✅ FIX 1: Helper function to count total cards (not unique users)
-# 1 user with 2 cards = 2 players
 def count_total_cards(game):
     """Count total cards across all ready players, not unique users."""
     return sum(len(p.get('cards', [])) for p in game.get('ready_players', {}).values())
@@ -1223,7 +1220,7 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE, lang=None):
             "ℹ️ Information(መረጃ)\n\n🎮 እንዴት እንደሚጫወቱ\n"
             "1. \"Play Now/ይጫወቱ\" የሚለውን ይጫኑ\n"
             "2. የቢንጎ ካርዶችዎን ይምረጡ\n"
-            "3. ቁጥሮች ሲጠሩ እየተከታተሉ ካርዶችዎ ውስጥ ካሉ ያጥቁሩ\n"
+            "3. ቁጥሮች ሲጠሩ እየተተኩ ካርዶችዎ ውስጥ ካሉ ያጥቁሩ\n"
             "4. ቢያንስ አንድ የማሸነፊያ ንድፍ ሲያጠናቅቁ \"BINGO\" ይበሉ\n\n"
             "መልካም ዕድል ይገጥምዎ! 🍀"
         )
@@ -1324,7 +1321,6 @@ def on_connect():
         time_left = 0
         if game['timer_started_at'] and not game['running']:
             time_left = max(0, 35 - int(time_module.time() - game['timer_started_at']))
-        # ✅ FIX 1: Use count_total_cards helper
         emit('game_state_update', {
             'room': room_id,
             'game_running': game['running'],
@@ -1361,7 +1357,7 @@ def on_leave_room(data):
 @socketio.on('request_countdown')
 def on_request_countdown(data):
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
     if not game['running']:
         game['timer_started_at'] = time_module.time()
         game['game_id'] = data.get('game_id', generate_game_id())
@@ -1375,7 +1371,7 @@ def on_request_countdown(data):
 @socketio.on('player_ready')
 def on_player_ready(data):
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
 
     user_id = data.get('user_id')
     name = data.get('name', 'Player')
@@ -1388,11 +1384,9 @@ def on_player_ready(data):
             'cards': cards,
             'card_num': cards[0] if cards else '—',
         }
-        # ✅ FIX 1: Count TOTAL CARDS, not unique users
         total = count_total_cards(game)
         game['total_players'] = total
     else:
-        # ✅ FIX 1: Count TOTAL CARDS here too
         total = count_total_cards(game)
 
     socketio.emit('player_joined', {
@@ -1405,13 +1399,12 @@ def on_player_ready(data):
 @socketio.on('declare_winner')
 def on_declare_winner(data):
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
 
-    # Derive stake from room name: room '10' = 10 birr, room '20' = 20 birr
     try:
         stake = int(room)
     except ValueError:
-        stake = 10  # safe fallback
+        stake = 10
 
     user_id = data.get('user_id')
     winner_name = data.get('name', 'Player')
@@ -1430,10 +1423,7 @@ def on_declare_winner(data):
             'card_num': card_num
         }
 
-    # ✅ FIX 1: Count TOTAL CARDS, not unique users
     total_players = count_total_cards(game)
-
-    # ✅ FIX: use actual stake per room, not hardcoded 10
     prize = round(total_players * stake * 0.8)
 
     socketio.emit('winner_found', {
@@ -1451,7 +1441,7 @@ def on_declare_winner(data):
 @socketio.on('admin_manual_call')
 def on_admin_manual_call(data):
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
 
     number = data.get('number')
     admin  = data.get('admin', 'admin')
@@ -1467,7 +1457,7 @@ def on_admin_manual_call(data):
 @socketio.on('set_max_winners')
 def on_set_max_winners(data):
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
     mx = data.get('max', 1)
     game['max_winners'] = max(1, min(4, int(mx)))
     socketio.emit('max_winners_updated', {'room': room, 'max': game['max_winners']}, room=f'bingo_room_{room}')
@@ -1476,7 +1466,7 @@ def on_set_max_winners(data):
 @socketio.on('admin_pause_game')
 def on_admin_pause_game(data):
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
     game['paused'] = not game.get('paused', False)
     socketio.emit('game_paused', {'room': room, 'paused': game['paused']}, room=f'bingo_room_{room}')
 
@@ -1633,10 +1623,13 @@ def api_game_played():
     return jsonify({'success': True})
 
 
+# ✅ FIX 3: Removed the auto-start logic from api_game_state.
+# The game now only starts via socket events or /api/start_game.
+# This was the root cause of the Room 20 restart bug after ~19 calls.
 @flask_app.route('/api/game_state', methods=['GET', 'OPTIONS'])
 def api_game_state():
     room = request.args.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
     now = time_module.time()
     time_left = 35
 
@@ -1644,14 +1637,8 @@ def api_game_state():
         if game['timer_started_at']:
             elapsed = int(now - game['timer_started_at'])
             time_left = max(0, 35 - elapsed)
-            if time_left == 0:
-                game['running'] = True
-                game['started_at'] = now
-                socketio.emit('game_started', {
-                    'room': room,
-                    'game_id': game['game_id'],
-                    'total_players': count_total_cards(game)  # ✅ FIX 1
-                }, room=f'bingo_room_{room}')
+            # ✅ REMOVED auto-start: do NOT set game['running'] = True here.
+            # Game starts only via socket 'game_started' event or /api/start_game.
         else:
             game['timer_started_at'] = now
             time_left = 35
@@ -1661,7 +1648,7 @@ def api_game_state():
         'game_running': game['running'],
         'game_id': game['game_id'],
         'time_left': time_left,
-        'total_players': count_total_cards(game),  # ✅ FIX 1
+        'total_players': count_total_cards(game),
     })
 
 
@@ -1671,7 +1658,7 @@ def api_start_game():
         return jsonify({'success': True}), 200
     data = request.json or {}
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
     game['running'] = True
     game['game_id'] = data.get('game_id', '')
     game['started_at'] = time_module.time()
@@ -1682,6 +1669,7 @@ def api_start_game():
     return jsonify({'success': True})
 
 
+# ✅ FIX 3b: api_end_game now emits game_cancelled so all clients reset their UI cleanly.
 @flask_app.route('/api/end_game', methods=['POST', 'OPTIONS'])
 def api_end_game():
     if request.method == 'OPTIONS':
@@ -1690,6 +1678,7 @@ def api_end_game():
     room = data.get('room', '10')
     game_states[room] = default_game_state()
     game_states[room]['timer_started_at'] = time_module.time()
+    socketio.emit('game_cancelled', {'room': room, 'reason': 'game_ended'}, room=f'bingo_room_{room}')
     return jsonify({'success': True})
 
 
@@ -1779,7 +1768,7 @@ def api_admin_dashboard():
         return jsonify({'success': True}), 200
     try:
         stats = db.get_dashboard_stats()
-        stats['active_online'] = sum(count_total_cards(g) for g in game_states.values())  # ✅ FIX 1
+        stats['active_online'] = sum(count_total_cards(g) for g in game_states.values())
         stats['running_games'] = sum(1 for g in game_states.values() if g.get('running'))
         stats['success'] = True
         return jsonify(stats)
@@ -2022,7 +2011,7 @@ def api_manual_call():
         return jsonify({'success': True}), 200
     data   = request.json or {}
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
     number = data.get('number')
     if not number or number < 1 or number > 75:
         return jsonify({'success': False, 'error': 'Invalid number'}), 400
@@ -2040,7 +2029,7 @@ def api_set_max_winners():
         return jsonify({'success': True}), 200
     data = request.json or {}
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
     mx = max(1, min(4, int(data.get('max_winners', 1))))
     game['max_winners'] = mx
     socketio.emit('max_winners_updated', {'room': room, 'max': mx}, room=f'bingo_room_{room}')
@@ -2053,7 +2042,7 @@ def api_pause_game():
         return jsonify({'success': True}), 200
     data = request.json or {}
     room = data.get('room', '10')
-    game = get_game_state(room)  # ✅ FIX 2
+    game = get_game_state(room)
     game['paused'] = not game.get('paused', False)
     socketio.emit('game_paused', {'room': room, 'paused': game['paused']}, room=f'bingo_room_{room}')
     return jsonify({'success': True, 'paused': game['paused'], 'room': room})
@@ -2133,30 +2122,37 @@ def run_flask():
     socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
 
 
-# ✅ AUTOMATIC BALL CALLER: Runs in the background for BOTH rooms
+# ✅ FIX 2: auto_call_loop now iterates over a snapshot of room IDs and
+# re-fetches the game state after sleep to avoid stale references after a reset.
 def auto_call_loop():
     CALL_INTERVAL = 5  # Call a ball every 5 seconds
     while True:
         time_module.sleep(CALL_INTERVAL)
-        for room_id, game in game_states.items():
-            # Only call if the game is running, not paused, and no one has won yet
+        for room_id in list(game_states.keys()):
+            game = game_states.get(room_id)
+            if not game:
+                continue
             if game.get('running') and not game.get('paused') and not game.get('winner_declared'):
                 called = game.get('called', [])
                 if len(called) >= 75:
-                    continue # All numbers called
-                
-                # Find a number that hasn't been called yet
+                    continue
+
                 available = [n for n in range(1, 76) if n not in called]
                 if not available:
                     continue
-                    
+
                 number = random.choice(available)
+
+                # Re-fetch in case the game was reset between sleep and now
+                game = game_states.get(room_id)
+                if not game or not game.get('running'):
+                    continue
+
                 game.setdefault('called', []).append(number)
                 game['current'] = number
-                
-                # Broadcast the number to everyone in the room
+
                 socketio.emit('ball_called', {
-                    'room': room_id, 
+                    'room': room_id,
                     'number': number
                 }, room=f'bingo_room_{room_id}')
 
