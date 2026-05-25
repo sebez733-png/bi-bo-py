@@ -1625,9 +1625,17 @@ def api_game_state():
         if game['timer_started_at']:
             elapsed = int(now - game['timer_started_at'])
             time_left = max(0, 35 - elapsed)
+            
+            # ✅ ROOT CAUSE FIX: When the countdown hits 0, actually broadcast `game_started`!
             if time_left == 0:
                 game['running'] = True
                 game['started_at'] = now
+                # This was missing! The server changed the state but never told the mini app.
+                socketio.emit('game_started', {
+                    'room': room,
+                    'game_id': game['game_id'],
+                    'total_players': len(game.get('ready_players', {}))
+                }, room=f'bingo_room_{room}')
         else:
             game['timer_started_at'] = now
             time_left = 35
