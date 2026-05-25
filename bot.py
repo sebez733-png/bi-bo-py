@@ -273,7 +273,7 @@ def start_room_game_loop(room):
             'game_id': game['game_id'],
             'time_left': max(0, int(time_left)),
             'unique_players': get_unique_player_count(game),
-            'total_cards': get_total_cards(game),
+            'total_cards': get_total_cards(game),   # #7: frontend shows this as player counter
         }, room=socket_room)
 
         time_module.sleep(1)
