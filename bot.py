@@ -7,6 +7,7 @@ from flask_socketio import SocketIO, emit
 import threading
 import re
 import db
+import random  # ✅ Needed for automatic ball calling
 
 from db import (
     add_user,
@@ -1625,12 +1626,9 @@ def api_game_state():
         if game['timer_started_at']:
             elapsed = int(now - game['timer_started_at'])
             time_left = max(0, 35 - elapsed)
-            
-            # ✅ ROOT CAUSE FIX: When the countdown hits 0, actually broadcast `game_started`!
             if time_left == 0:
                 game['running'] = True
                 game['started_at'] = now
-                # This was missing! The server changed the state but never told the mini app.
                 socketio.emit('game_started', {
                     'room': room,
                     'game_id': game['game_id'],
@@ -2117,6 +2115,34 @@ def run_flask():
     socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
 
 
+# ✅ AUTOMATIC BALL CALLER: Runs in the background for BOTH rooms
+def auto_call_loop():
+    CALL_INTERVAL = 5  # Call a ball every 5 seconds
+    while True:
+        time_module.sleep(CALL_INTERVAL)
+        for room_id, game in game_states.items():
+            # Only call if the game is running, not paused, and no one has won yet
+            if game.get('running') and not game.get('paused') and not game.get('winner_declared'):
+                called = game.get('called', [])
+                if len(called) >= 75:
+                    continue # All numbers called
+                
+                # Find a number that hasn't been called yet
+                available = [n for n in range(1, 76) if n not in called]
+                if not available:
+                    continue
+                    
+                number = random.choice(available)
+                game.setdefault('called', []).append(number)
+                game['current'] = number
+                
+                # Broadcast the number to everyone in the room
+                socketio.emit('ball_called', {
+                    'room': room_id, 
+                    'number': number
+                }, room=f'bingo_room_{room_id}')
+
+
 # ==========================
 # APP SETUP
 # ==========================
@@ -2160,5 +2186,10 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
-print("✅ Bot is running with Multi-Room SocketIO + MongoDB Cloud...")
+
+# ✅ Start the automatic game loop thread
+auto_call_thread = threading.Thread(target=auto_call_loop, daemon=True)
+auto_call_thread.start()
+
+print("✅ Bot is running with Multi-Room SocketIO + Auto-Caller + MongoDB Cloud...")
 app.run_polling()
