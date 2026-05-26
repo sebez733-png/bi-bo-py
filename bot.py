@@ -1359,17 +1359,12 @@ def on_request_countdown(data):
     room = data.get('room', '10')
     game = get_game_state(room)
     if not game['running']:
-        # ✅ Only reset timer if not already counting down
-        if not game.get('timer_started_at'):
-            game['timer_started_at'] = time_module.time()
-            game['game_id'] = data.get('game_id', generate_game_id())
-        # ✅ Always broadcast REAL remaining time to everyone
-        elapsed = int(time_module.time() - game['timer_started_at'])
-        time_left = max(0, 35 - elapsed)
+        game['timer_started_at'] = time_module.time()
+        game['game_id'] = data.get('game_id', generate_game_id())
         socketio.emit('countdown_update', {
             'room': room,
             'game_id': game['game_id'],
-            'time_left': time_left  # ✅ real time, not always 35
+            'time_left': 35
         }, room=f'bingo_room_{room}')
 
 
@@ -1639,22 +1634,14 @@ def api_game_state():
     time_left = 35
 
     if not game['running']:
-        if game.get('timer_started_at'):
+        if game['timer_started_at']:
             elapsed = int(now - game['timer_started_at'])
             time_left = max(0, 35 - elapsed)
-        # ✅ Don't auto-start timer here — let socket events control it
-    else:
-        time_left = 0
-
-    return jsonify({
-        'room': room,
-        'game_running': game['running'],
-        'game_id': game.get('game_id'),
-        'time_left': time_left,
-        'total_players': count_total_cards(game),
-        'called_numbers': game.get('called', []),
-        'current_number': game.get('current'),
-    })
+            # ✅ REMOVED auto-start: do NOT set game['running'] = True here.
+            # Game starts only via socket 'game_started' event or /api/start_game.
+        else:
+            game['timer_started_at'] = now
+            time_left = 35
 
     return jsonify({
         'room': room,
@@ -2147,18 +2134,8 @@ def auto_call_loop():
                 continue
 
             # ✅ AUTO-START: When countdown expires, start the game on server
-            # ✅ COUNTDOWN BROADCAST + AUTO-START
             if not game['running'] and game.get('timer_started_at') and not game.get('winner_declared'):
                 elapsed = int(time_module.time() - game['timer_started_at'])
-                time_left = max(0, 35 - elapsed)
-
-                # ✅ Broadcast countdown every 2 seconds to ALL users in room
-                socketio.emit('countdown_update', {
-                    'room': room_id,
-                    'game_id': game.get('game_id', ''),
-                    'time_left': time_left
-                }, room=f'bingo_room_{room_id}')
-
                 if elapsed >= 35:
                     game['running'] = True
                     game['started_at'] = time_module.time()
