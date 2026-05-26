@@ -1639,14 +1639,22 @@ def api_game_state():
     time_left = 35
 
     if not game['running']:
-        if game['timer_started_at']:
+        if game.get('timer_started_at'):
             elapsed = int(now - game['timer_started_at'])
             time_left = max(0, 35 - elapsed)
-            # ✅ REMOVED auto-start: do NOT set game['running'] = True here.
-            # Game starts only via socket 'game_started' event or /api/start_game.
-        else:
-            game['timer_started_at'] = now
-            time_left = 35
+        # ✅ Don't auto-start timer here — let socket events control it
+    else:
+        time_left = 0
+
+    return jsonify({
+        'room': room,
+        'game_running': game['running'],
+        'game_id': game.get('game_id'),
+        'time_left': time_left,
+        'total_players': count_total_cards(game),
+        'called_numbers': game.get('called', []),
+        'current_number': game.get('current'),
+    })
 
     return jsonify({
         'room': room,
