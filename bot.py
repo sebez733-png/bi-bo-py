@@ -1359,12 +1359,17 @@ def on_request_countdown(data):
     room = data.get('room', '10')
     game = get_game_state(room)
     if not game['running']:
-        game['timer_started_at'] = time_module.time()
-        game['game_id'] = data.get('game_id', generate_game_id())
+        # ✅ Only reset timer if not already counting down
+        if not game.get('timer_started_at'):
+            game['timer_started_at'] = time_module.time()
+            game['game_id'] = data.get('game_id', generate_game_id())
+        # ✅ Always broadcast REAL remaining time to everyone
+        elapsed = int(time_module.time() - game['timer_started_at'])
+        time_left = max(0, 35 - elapsed)
         socketio.emit('countdown_update', {
             'room': room,
             'game_id': game['game_id'],
-            'time_left': 35
+            'time_left': time_left  # ✅ real time, not always 35
         }, room=f'bingo_room_{room}')
 
 
@@ -2134,8 +2139,18 @@ def auto_call_loop():
                 continue
 
             # ✅ AUTO-START: When countdown expires, start the game on server
+            # ✅ COUNTDOWN BROADCAST + AUTO-START
             if not game['running'] and game.get('timer_started_at') and not game.get('winner_declared'):
                 elapsed = int(time_module.time() - game['timer_started_at'])
+                time_left = max(0, 35 - elapsed)
+
+                # ✅ Broadcast countdown every 2 seconds to ALL users in room
+                socketio.emit('countdown_update', {
+                    'room': room_id,
+                    'game_id': game.get('game_id', ''),
+                    'time_left': time_left
+                }, room=f'bingo_room_{room_id}')
+
                 if elapsed >= 35:
                     game['running'] = True
                     game['started_at'] = time_module.time()
