@@ -1321,8 +1321,6 @@ def on_connect():
         time_left = 0
         if game['timer_started_at'] and not game['running']:
             time_left = max(0, 35 - int(time_module.time() - game['timer_started_at']))
-        
-        # Emit FULL state including all called numbers for sync
         emit('game_state_update', {
             'room': room_id,
             'game_running': game['running'],
@@ -1331,30 +1329,12 @@ def on_connect():
             'total_players': count_total_cards(game),
             'called_numbers': list(game.get('called', [])),
             'current_number': game.get('current'),
-            'paused': game.get('paused', False),
-            'winner_declared': game.get('winner_declared', False),
         })
 
 
 @socketio.on('disconnect')
 def on_disconnect():
     print(f'🔌 Client disconnected: {request.sid}')
-
-
-@socketio.on('request_sync')
-def on_request_sync(data):
-    room = data.get('room', '10')
-    game = get_game_state(room)
-    socketio.emit('sync_game_state', {
-        'room': room,
-        'game_running': game.get('running', False),
-        'game_id': game.get('game_id'),
-        'called_numbers': list(game.get('called', [])),
-        'current_number': game.get('current'),
-        'total_players': count_total_cards(game),
-        'paused': game.get('paused', False),
-        'winner_declared': game.get('winner_declared', False),
-    }, room=f'bingo_room_{room}')
 
 
 @socketio.on('join_room')
@@ -2172,15 +2152,6 @@ def auto_call_loop():
             if game.get('running') and not game.get('paused') and not game.get('winner_declared'):
                 called = game.get('called', [])
                 if len(called) >= 75:
-                    # Game over - all balls called
-                    if not game.get('winner_declared', False):
-                        game['winner_declared'] = True
-                        socketio.emit('game_ended', {
-                            'room': room_id,
-                            'game_id': game.get('game_id'),
-                            'reason': 'all_balls_called',
-                            'total_players': count_total_cards(game),
-                        }, room=f'bingo_room_{room_id}')
                     continue
 
                 available = [n for n in range(1, 76) if n not in called]
