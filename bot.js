@@ -1247,6 +1247,12 @@ io.on('connect', (socket) => {
             total_players: count_total_cards(game),
             called_numbers: [...(game.called || [])],
             current_number: game.current || null,
+            // ✅ FIX: send full player list to late joiners so they see who already picked cards
+            players: Object.entries(game.ready_players || {}).map(([uid, p]) => ({
+                user_id: uid,
+                name: p.name,
+                cards: p.cards,
+            }))
         });
     }
 
@@ -1270,7 +1276,6 @@ io.on('connect', (socket) => {
     socket.on('request_countdown', (data) => {
         const room = data.room || '10';
         const game = get_game_state(room);
-        // ✅ FIX 2: Only start timer if it hasn't started yet!
         if (!game.running && !game.timer_started_at) {
             game.timer_started_at = Math.floor(Date.now() / 1000);
             game.game_id = data.game_id || generateGameId();
@@ -1282,6 +1287,7 @@ io.on('connect', (socket) => {
         }
     });
 
+    // ✅ FIXED: player_ready now broadcasts full player list so all clients see card selections in real time
     socket.on('player_ready', (data) => {
         const room = data.room || '10';
         const game = get_game_state(room);
@@ -1300,11 +1306,15 @@ io.on('connect', (socket) => {
             const total = count_total_cards(game);
             game.total_players = total;
         }
-        
+
+        // ✅ Broadcast to entire room with user_id + selected_cards
+        // so every client can show who picked which card in the lobby
         io.to(`bingo_room_${room}`).emit('player_joined', {
             room: room,
             total_players: count_total_cards(game),
             player_name: name,
+            user_id: user_id,
+            selected_cards: cards,
         });
     });
 
@@ -1477,7 +1487,6 @@ app.post('/api/game_played', async (req, res) => {
     res.json({ success: true });
 });
 
-// ✅ FIX 1: Sends called_numbers to late players!
 app.get('/api/game_state', (req, res) => {
     const room = req.query.room || '10';
     const game = get_game_state(room);
@@ -1502,7 +1511,13 @@ app.get('/api/game_state', (req, res) => {
         total_players: count_total_cards(game),
         called_numbers: [...game.called],
         current_number: game.current || null,
-        call_count: game.called.length
+        call_count: game.called.length,
+        // ✅ FIX: include players so frontend can show card selections on page load
+        players: Object.entries(game.ready_players || {}).map(([uid, p]) => ({
+            user_id: uid,
+            name: p.name,
+            cards: p.cards,
+        }))
     });
 });
 
