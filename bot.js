@@ -1,5 +1,4 @@
-const { Telegraf, Markup } = require('telegraf');
-const session = require('telegraf/session');
+const { Telegraf, Markup, session } = require('telegraf');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
