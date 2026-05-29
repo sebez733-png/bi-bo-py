@@ -16,7 +16,7 @@ const MINI_APP_URL = "https://sebez733-png.github.io/bingio-mini-app/";
 
 const ADMIN_CREDENTIALS = {
     'superadmin': { password: 'admin123', role: 'super' },
-    'admin1': { password: 'pass123', role: 'regular' },
+    'admin1':     { password: 'pass123',  'role': 'regular' },
 };
 
 // --------------------------
@@ -57,7 +57,7 @@ function verifyTelebirrSms(sms_text, expected_amount) {
     if (!txn_match) {
         return { valid: false, reason: "❌ Could not find transaction number in SMS. Please paste the full SMS." };
     }
-    const transaction_id = txn_match[1].trim();
+    const transaction_id = txn_match[1].strip();
     const phone_match = sms_text.match(/\((\d{4}\*+\d{2,4})\)/);
     if (phone_match) {
         const receiver_partial = phone_match[1];
@@ -467,7 +467,7 @@ bot.on('text', async (ctx) => {
             `📱 Phone: ${user[1]}\n\n` +
             `💰 Main Wallet: ${user[2]} ETB\n` +
             `🎮 Play Wallet: ${user[3]} ETB\n\n` +
-            `🎯 Games Played: ${played}\n` +
+            `🎯 Games Played: {played}\n` +
             `🏆 Games Won: ${won}\n` +
             `💵 Total Won: ${total_won} ETB\n\n` +
             `👥 Referrals: ${ref_count}\n` +
@@ -570,7 +570,7 @@ bot.on('text', async (ctx) => {
         const amount = parseInt(text);
         const balance = await db.get_main_balance(user_id);
         if (amount > balance) {
-            const bal_msg = lang === 'am' ? `❌ በቂ ሂሳብ የለም (Main Wallet)\n💰 ያለዎት: ${balance} ETB` : `❌ Insufficient balance (Main Wallet)\n💰 You have: ${balance} ETB`;
+            const bal_msg = lang === 'am' ? `❌ በቂ ሂሳብ የለም (Main Wallet)\n💰 ያለዎት: ${balance} ETB` : `❌ Insufficient balance (Main Wallet)\n💰 You have: {balance} ETB`;
             await ctx.reply(bal_msg);
             return;
         }
@@ -613,7 +613,7 @@ bot.on('text', async (ctx) => {
             pay_msg = 
                 `💳 Payment Instructions\n\n` +
                 `Send *${amount} Birr* to:\n\n` +
-                `🏦 Method: ${method}\n` +
+                `🏦 Method: {method}\n` +
                 `📱 Phone:\n\`${phone}\`\n\n` +
                 `ℹ️ After sending the money, copy the entire confirmation SMS from Telebirr and paste it here 👇`;
         } else {
@@ -728,7 +728,7 @@ bot.on('text', async (ctx) => {
                         parseInt(ref_by),
                         "🎉 Referral Deposit Bonus!\n\n" +
                         `👤 Your referral deposited: ${confirmed_amount} ETB\n` +
-                        `💰 You earned: ${ref_bonus} ETB (10%)\n\n` +
+                        `💰 You earned: {ref_bonus} ETB (10%)\n\n` +
                         "🙏 Keep inviting more friends!"
                     );
                 } catch (e) {}
@@ -755,8 +755,8 @@ bot.on('text', async (ctx) => {
                     admin_id,
                     "✅ DEPOSIT VERIFIED\n\n" +
                     `👤 User ID: ${user_id}\n` +
-                    `💰 Amount: ${confirmed_amount} ETB\n` +
-                    `🎁 Bonus: ${bonus} ETB\n` +
+                    `💰 Amount: {confirmed_amount} ETB\n` +
+                    `🎁 Bonus: {bonus} ETB\n` +
                     `📈 Total: ${total} ETB\n` +
                     `🔖 TXN: ${transaction_id}\n` +
                     `📅 ${result.date || ''} ${result.time || ''}`
@@ -867,7 +867,7 @@ bot.on('text', async (ctx) => {
             balance = await db.get_play_balance(user_id);
         }
         if (amount > balance) {
-            const err_msg = lang === 'am' ? `❌ በቂ ሂሳብ የለም (${wallet_type})\n💰 ያለዎት: ${balance} ETB` : `❌ Insufficient balance (${wallet_type})\n💰 Balance: ${balance} ETB`;
+            const err_msg = lang === 'am' ? `❌ በቂ ሂሳብ የለም (${wallet_type})\n💰 ያለዎት: ${balance} ETB` : `❌ Insufficient balance (${wallet_type})\n💰 Balance: {balance} ETB`;
             await ctx.reply(err_msg);
             return;
         }
@@ -892,9 +892,9 @@ bot.on('text', async (ctx) => {
 
         const sender_success_msg = 
             `✅ Transfer Successful!\n\n` +
-            `💸 Sent: {amount} ETB\n` +
+            `💸 Sent: ${amount} ETB\n` +
             `👤 To: ${receiver_name}\n` +
-            `🏦 Wallet: ${wallet_type}\n` +
+            `🏦 Wallet: {wallet_type}\n` +
             `✅ Money added to the user's ${wallet_type}.`;
         await ctx.reply(sender_success_msg, getInlineMenu(lang));
         await ctx.reply("⬇️ Menu:", getMainMenu(lang));
@@ -903,7 +903,7 @@ bot.on('text', async (ctx) => {
             `💰 Money Received!\n\n` +
             `💸 Amount: ${amount} ETB\n` +
             `👤 From: ${sender_name}\n` +
-            `🏦 Wallet: ${wallet_type}\n` +
+            `🏦 Wallet: {wallet_type}\n` +
             `✅ The money has been added to your ${wallet_type}.`;
         try {
             await bot.telegram.sendMessage(target_id, receiver_msg);
@@ -1030,7 +1030,7 @@ bot.on('callback_query', async (ctx) => {
                 `💰 Main Wallet: ${user[2]} ETB\n` +
                 `🎮 Play Wallet: ${user[3]} ETB\n\n` +
                 `🎯 Games Played: ${played}\n` +
-                `🏆 Games Won: ${won}\n` +
+                `🏆 Games Won: {won}\n` +
                 `💵 Total Won: ${total_won_amt} ETB\n\n` +
                 `👥 Referrals: ${ref_count}\n` +
                 `🎯 Invited By: ${user.length > 4 && user[4] ? user[4] : 'No inviter'}\n\n` +
@@ -1045,7 +1045,7 @@ bot.on('callback_query', async (ctx) => {
             "☎️ Support (ድጋፍ)\n\nFor any comment and question, contact support:\n@thelastking12312345678\n@Silencedoeir\n@one_day_82";
         await ctx.reply(support_msg);
     } else if (data === "menu_invite") {
-        const link = `https://t.me/${BOT_USERNAME}?start=${user_id}`;
+        const link = `https://t.me/{BOT_USERNAME}?start=${user_id}`;
         const ref_count = await db.get_referral_count(user_id);
         const invite_msg = 
             "🎁 Invite Friends System\n\n" +
@@ -1247,7 +1247,6 @@ io.on('connect', (socket) => {
             total_players: count_total_cards(game),
             called_numbers: [...(game.called || [])],
             current_number: game.current || null,
-            // ✅ FIX: send full player list to late joiners so they see who already picked cards
             players: Object.entries(game.ready_players || {}).map(([uid, p]) => ({
                 user_id: uid,
                 name: p.name,
@@ -1287,7 +1286,6 @@ io.on('connect', (socket) => {
         }
     });
 
-    // ✅ FIXED: player_ready now broadcasts full player list so all clients see card selections in real time
     socket.on('player_ready', (data) => {
         const room = data.room || '10';
         const game = get_game_state(room);
@@ -1297,7 +1295,8 @@ io.on('connect', (socket) => {
         const cards = data.cards || [];
         const game_id = data.game_id;
 
-        if (game_id === game.game_id && !game.winner_declared) {
+        // ✅ FIX: Accept ALL players during countdown phase, no matter their game_id!
+        if (!game.running && !game.winner_declared) {
             game.ready_players[user_id] = {
                 name: name,
                 cards: cards,
@@ -1307,8 +1306,6 @@ io.on('connect', (socket) => {
             game.total_players = total;
         }
 
-        // ✅ Broadcast to entire room with user_id + selected_cards
-        // so every client can show who picked which card in the lobby
         io.to(`bingo_room_${room}`).emit('player_joined', {
             room: room,
             total_players: count_total_cards(game),
@@ -1512,7 +1509,6 @@ app.get('/api/game_state', (req, res) => {
         called_numbers: [...game.called],
         current_number: game.current || null,
         call_count: game.called.length,
-        // ✅ FIX: include players so frontend can show card selections on page load
         players: Object.entries(game.ready_players || {}).map(([uid, p]) => ({
             user_id: uid,
             name: p.name,
@@ -1660,7 +1656,7 @@ app.post('/api/admin/approve_withdrawal', async (req, res) => {
     await db.update_main_balance(user_id, -amount);
     await db.add_transaction(user_id, 'withdraw', amount);
     try {
-        await bot.telegram.sendMessage(user_id, `✅ Withdrawal Approved!\n\n💰 Amount: ${amount} ETB\n🏦 The money has been sent to your account.`);
+        await bot.telegram.sendMessage(user_id, `✅ Withdrawal Approved!\n\n💰 Amount: {amount} ETB\n🏦 The money has been sent to your account.`);
     } catch (e) {
         console.log(`Failed to send approval message to user ${user_id}: ${e.message}`);
     }
