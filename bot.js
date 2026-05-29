@@ -1,12 +1,11 @@
 const { Telegraf, Markup } = require('telegraf');
+const session = require('telegraf/session');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const db = require('./db'); // We will create this next!
-const fs = require('fs');
-const path = require('path');
+const db = require('./db');
 
 // --------------------------
 // CONFIG
@@ -119,7 +118,6 @@ function default_game_state() {
     };
 }
 
-// FIX 2: Helper function that ensures room exists in game_states dict
 function get_game_state(room) {
     if (!game_states[room]) {
         game_states[room] = default_game_state();
@@ -127,13 +125,11 @@ function get_game_state(room) {
     return game_states[room];
 }
 
-// Separate states for Room 10 and Room 20
 let game_states = {
     '10': default_game_state(),
     '20': default_game_state()
 };
 
-// FIX 1: Helper function to count total cards (not unique users)
 function count_total_cards(game) {
     return Object.values(game.ready_players || {}).reduce((sum, p) => sum + (p.cards || []).length, 0);
 }
@@ -298,6 +294,8 @@ function getInlineMenu(lang = 'am') {
 // APP SETUP (Telegraf)
 // --------------------------
 const bot = new Telegraf(TOKEN);
+bot.use(session());
+
 
 // --------------------------
 // START
@@ -368,7 +366,7 @@ bot.on('contact', async (ctx) => {
 // TEXT HANDLER
 // --------------------------
 bot.on('text', async (ctx) => {
-    if (ctx.message.web_app_data) return; // handled separately
+    if (ctx.message.web_app_data) return;
     const user_id = ctx.from.id;
     let text = ctx.message.text;
     const first_name = ctx.from.first_name || '';
@@ -544,7 +542,6 @@ bot.on('text', async (ctx) => {
         return;
     }
 
-    // State Machine for Deposit/Withdraw/Transfer
     if (user_state[user_id] === "deposit_amount") {
         if (!/^\d+$/.test(text)) {
             const err_msg = lang === 'am' ? "❌ ቁጥር ብቻ ያስገቡ" : "❌ Please enter a valid number";
@@ -896,7 +893,7 @@ bot.on('text', async (ctx) => {
 
         const sender_success_msg = 
             `✅ Transfer Successful!\n\n` +
-            `💸 Sent: ${amount} ETB\n` +
+            `💸 Sent: {amount} ETB\n` +
             `👤 To: ${receiver_name}\n` +
             `🏦 Wallet: ${wallet_type}\n` +
             `✅ Money added to the user's ${wallet_type}.`;
@@ -1194,8 +1191,6 @@ bot.command('re', async (ctx) => {
 // --------------------------
 // COMMAND SHORTCUTS
 // --------------------------
-bot.command('play', (ctx) => ctx.reply('🎮 Open Game')); // Simplified to trigger text handler logic, but since text handler is separate, we emulate it
-// Since we can't pass custom text directly to the text handler easily in Telegraf without trickery:
 bot.command('play', async (ctx) => { ctx.message.text = "🎮 Open Game"; await bot.handleUpdate(ctx.update); });
 bot.command('deposit', async (ctx) => { ctx.message.text = "💳 Deposit"; await bot.handleUpdate(ctx.update); });
 bot.command('balance', async (ctx) => { ctx.message.text = "💰 Balance"; await bot.handleUpdate(ctx.update); });
@@ -1276,7 +1271,8 @@ io.on('connect', (socket) => {
     socket.on('request_countdown', (data) => {
         const room = data.room || '10';
         const game = get_game_state(room);
-        if (!game.running) {
+        // ✅ FIX 2: Only start timer if it hasn't started yet!
+        if (!game.running && !game.timer_started_at) {
             game.timer_started_at = Math.floor(Date.now() / 1000);
             game.game_id = data.game_id || generateGameId();
             io.to(`bingo_room_${room}`).emit('countdown_update', {
@@ -1482,7 +1478,7 @@ app.post('/api/game_played', async (req, res) => {
     res.json({ success: true });
 });
 
-// FIX 3: Removed the auto-start logic from api_game_state.
+// ✅ FIX 1: Sends called_numbers to late players!
 app.get('/api/game_state', (req, res) => {
     const room = req.query.room || '10';
     const game = get_game_state(room);
@@ -1505,6 +1501,9 @@ app.get('/api/game_state', (req, res) => {
         game_id: game.game_id,
         time_left: time_left,
         total_players: count_total_cards(game),
+        called_numbers: [...game.called],
+        current_number: game.current || null,
+        call_count: game.called.length
     });
 });
 
@@ -1521,7 +1520,6 @@ app.post('/api/start_game', (req, res) => {
     res.json({ success: true });
 });
 
-// FIX 3b: api_end_game now emits game_cancelled
 app.post('/api/end_game', (req, res) => {
     const room = req.body.room || '10';
     game_states[room] = default_game_state();
@@ -1584,7 +1582,6 @@ app.get('/api/my_rank', async (req, res) => {
     const [rank, value] = await db.get_user_rank(user_id, period, category);
     res.json({ success: true, rank, value });
 });
-
 
 // ══════════════════════════════════════════════════════════
 // ADMIN EXPRESS ROUTES
@@ -1832,16 +1829,14 @@ app.post('/api/admin/settings', (req, res) => {
 });
 
 
-// ✅ FIX 2: auto_call_loop now iterates over a snapshot of room IDs
 function autoCallLoop() {
-    const CALL_INTERVAL = 2000; // 2 seconds
+    const CALL_INTERVAL = 2000;
     setInterval(() => {
         const roomIds = Object.keys(game_states);
         for (const room_id of roomIds) {
             const game = game_states[room_id];
             if (!game) continue;
 
-            // ✅ AUTO-START: When countdown expires, start the game on server
             if (!game.running && game.timer_started_at && !game.winner_declared) {
                 const elapsed = Math.floor(Date.now() / 1000 - game.timer_started_at);
                 if (elapsed >= 35) {
@@ -1858,7 +1853,6 @@ function autoCallLoop() {
                 }
             }
 
-            // Call balls if game is running
             if (game.running && !game.paused && !game.winner_declared) {
                 if (game.called.length >= 75) continue;
 
@@ -1870,7 +1864,6 @@ function autoCallLoop() {
 
                 const number = available[Math.floor(Math.random() * available.length)];
 
-                // Re-fetch in case the game was reset between interval and now
                 const current_game = game_states[room_id];
                 if (!current_game || !current_game.running) continue;
 
@@ -1894,15 +1887,12 @@ async function startServer() {
         await mongoose.connect(process.env.MONGO_URI || "mongodb+srv://placeholder:placeholder@cluster.mongodb.net/adwa_bingo?retryWrites=true&w=majority");
         console.log("✅ Connected to MongoDB Cloud Database!");
 
-        // Start Express + SocketIO
         server.listen(5000, '0.0.0.0', () => {
             console.log('✅ API & SocketIO running on port 5000');
         });
 
-        // Start Auto Call Loop
         autoCallLoop();
 
-        // Start Telegram Bot
         console.log("✅ Bot is running with Multi-Room SocketIO + Auto-Caller + MongoDB Cloud...");
         bot.launch();
 
@@ -1913,6 +1903,5 @@ async function startServer() {
 
 startServer();
 
-// Enable graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
