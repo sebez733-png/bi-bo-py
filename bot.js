@@ -1,10 +1,3 @@
-Here is the complete, fixed `bot.js` code. I applied the 2 critical fixes that solve the timer not counting down and make sure the Game ID shows properly.
-
-**What I fixed inside:**
-1. In `socket.on('declare_winner'`: Added `game.running = false;` and `game.timer_started_at = null;` so the server properly resets the room when someone wins, allowing the next countdown to start.
-2. In `app.get('/api/game_state'`: Removed the line `game.timer_started_at = now;` that was forcing the timer to start prematurely before players even clicked start.
-
-```javascript
 const { Telegraf, Markup, session } = require('telegraf');
 const express = require('express');
 const http = require('http');
@@ -1925,4 +1918,3 @@ startServer();
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-```
