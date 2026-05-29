@@ -1368,6 +1368,31 @@ def on_request_countdown(data):
         }, room=f'bingo_room_{room}')
 
 
+# ========== NEW: Handle game state request from Mini App ==========
+@socketio.on('request_game_state')
+def on_request_game_state(data):
+    room = data.get('room', '10')
+    game = get_game_state(room)
+    
+    # Calculate correct time left
+    time_left = 35
+    if not game['running'] and game.get('timer_started_at'):
+        elapsed = int(time_module.time() - game['timer_started_at'])
+        time_left = max(0, 35 - elapsed)
+    
+    emit('current_game_state', {
+        'room': room,
+        'game_running': game['running'],
+        'game_id': game['game_id'],
+        'time_left': time_left,
+        'total_players': count_total_cards(game),
+        'called_numbers': list(game.get('called', [])),
+        'current_number': game.get('current'),
+        'recent_balls': list(game.get('called', []))[-4:] if game.get('called') else []
+    })
+# ========== END NEW ==========
+
+
 @socketio.on('player_ready')
 def on_player_ready(data):
     room = data.get('room', '10')
