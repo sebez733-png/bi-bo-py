@@ -427,9 +427,7 @@ def get_inline_menu(lang='am'):
                 InlineKeyboardButton("ℹ️ Info / መረጃ", callback_data="menu_info")
             ]
         ])
-
-
-# --------------------------
+        # --------------------------
 # START
 # --------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1438,6 +1436,23 @@ def on_declare_winner(data):
     }, room=f'bingo_room_{room}')
 
 
+# ✅ NEW: MULTIPLAYER - Request new round after winner countdown
+@socketio.on('request_new_round')
+def on_request_new_round(data):
+    room = data.get('room', '10')
+    # Reset the game state for the room
+    game_states[room] = default_game_state()
+    game_states[room]['timer_started_at'] = time_module.time()
+    game_states[room]['game_id'] = generate_game_id()
+    
+    # Tell all clients in the room to reset and start 35s countdown
+    socketio.emit('new_round', {
+        'room': room,
+        'game_id': game_states[room]['game_id'],
+        'time_left': 35
+    }, room=f'bingo_room_{room}')
+
+
 @socketio.on('admin_manual_call')
 def on_admin_manual_call(data):
     room = data.get('room', '10')
@@ -1623,9 +1638,7 @@ def api_game_played():
     return jsonify({'success': True})
 
 
-# ✅ FIX 3: Removed the auto-start logic from api_game_state.
-# The game now only starts via socket events or /api/start_game.
-# This was the root cause of the Room 20 restart bug after ~19 calls.
+# ✅ FIXED: api_game_state now includes called_numbers, current_number, call_count
 @flask_app.route('/api/game_state', methods=['GET', 'OPTIONS'])
 def api_game_state():
     room = request.args.get('room', '10')
@@ -1637,8 +1650,6 @@ def api_game_state():
         if game['timer_started_at']:
             elapsed = int(now - game['timer_started_at'])
             time_left = max(0, 35 - elapsed)
-            # ✅ REMOVED auto-start: do NOT set game['running'] = True here.
-            # Game starts only via socket 'game_started' event or /api/start_game.
         else:
             game['timer_started_at'] = now
             time_left = 35
@@ -1649,6 +1660,9 @@ def api_game_state():
         'game_id': game['game_id'],
         'time_left': time_left,
         'total_players': count_total_cards(game),
+        'called_numbers': game.get('called', []),
+        'current_number': game.get('current'),
+        'call_count': len(game.get('called', []))
     })
 
 
@@ -1669,7 +1683,6 @@ def api_start_game():
     return jsonify({'success': True})
 
 
-# ✅ FIX 3b: api_end_game now emits game_cancelled so all clients reset their UI cleanly.
 @flask_app.route('/api/end_game', methods=['POST', 'OPTIONS'])
 def api_end_game():
     if request.method == 'OPTIONS':
@@ -2122,8 +2135,7 @@ def run_flask():
     socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
 
 
-# ✅ FIX 2: auto_call_loop now iterates over a snapshot of room IDs and
-# re-fetches the game state after sleep to avoid stale references after a reset.
+# ✅ Auto-call loop with auto-start when countdown expires
 def auto_call_loop():
     CALL_INTERVAL = 2  # Call a ball every 2 seconds
     while True:
@@ -2222,5 +2234,5 @@ flask_thread.start()
 auto_call_thread = threading.Thread(target=auto_call_loop, daemon=True)
 auto_call_thread.start()
 
-print("✅ Bot is running with Multi-Room SocketIO + Auto-Caller + MongoDB Cloud...")
+print("✅ Bot is running with Multiplayer SocketIO + Auto-Caller + MongoDB Cloud...")
 app.run_polling()
