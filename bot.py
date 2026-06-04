@@ -360,7 +360,7 @@ def get_main_menu(lang='am'):
             ["🎮 Open Game"],
             ["💳 Deposit", "💰 Balance"],
             ["🐝 Withdraw", "📜 History"],
-            ["👤 Profile", "🏢 Support"],
+            ["👤 Profile", "🏢 Suupport"],
             ["🎁 Invite Friends", "🤖 Agent Panel"],
             ["🔄 Transfer", "ℹ️ Info"]
         ], resize_keyboard=True)
