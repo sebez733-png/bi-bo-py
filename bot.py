@@ -7,12 +7,13 @@ from flask_socketio import SocketIO, emit
 import threading
 import re
 import db
-import random  # ✅ Needed for automatic ball calling
+import random
 
 from db import (
     add_user,
     update_user_name,
     user_exists,
+    has_valid_phone,
     get_user,
     get_user_name,
     set_referral,
@@ -194,7 +195,6 @@ def default_game_state():
     }
 
 def get_game_state(room):
-    """Get or create game state for a room, always persisted in game_states dict."""
     if room not in game_states:
         game_states[room] = default_game_state()
     return game_states[room]
@@ -205,7 +205,6 @@ game_states = {
 }
 
 def count_total_cards(game):
-    """Count total cards across all ready players, not unique users."""
     return sum(len(p.get('cards', [])) for p in game.get('ready_players', {}).values())
 
 # --------------------------
@@ -237,7 +236,7 @@ TEXTS = {
         'en': "📱 Share Phone Number"
     },
     'welcome_back': {
-        'am': "👋 Welcome back!",
+        'am': "👋 እንኳን ደህና መጡ!",
         'en': "👋 Welcome back!"
     },
     'already_registered': {
@@ -422,6 +421,15 @@ def get_inline_menu(lang='am'):
         ])
 
 # --------------------------
+# HELPER: Show registration prompt
+# --------------------------
+def get_register_keyboard(lang='am'):
+    """Get the phone share keyboard for unregistered users."""
+    button_text = t('share_phone_btn', lang)
+    button = KeyboardButton(button_text, request_contact=True)
+    return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
+
+# --------------------------
 # START
 # --------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -430,22 +438,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ref_id = context.args[0] if context.args else None
     context.user_data["ref_by"] = ref_id
 
-    if user_exists(user_id):
-        user = get_user(user_id)
-        # ✅ FIX 3: CHECK if user has a VALID phone number (prevents ghost users from bypassing registration)
-        phone = user[1] if user and len(user) > 1 else ''
-        if phone and phone not in ('', 'N/A', 'None', None):
-            # Fully registered user
-            lang = get_user_language(user_id)
-            update_user_name(user_id, first_name)
-            menu = get_main_menu(lang)
-            await update.message.reply_text(t('welcome_back', lang), reply_markup=menu)
-            return
-        else:
-            # ⚠️ Partially registered (exists in DB but no phone) — force re-registration
-            pass  # Fall through to language selection below
+    print(f"🔹 /start called by user_id={user_id}, name={first_name}, user_exists={user_exists(user_id)}, has_valid_phone={has_valid_phone(user_id)}")
 
-    # New user or partially registered user — show language selection
+    # ✅ FIX: Use has_valid_phone instead of user_exists + manual phone check
+    if has_valid_phone(user_id):
+        lang = get_user_language(user_id)
+        update_user_name(user_id, first_name)
+        menu = get_main_menu(lang)
+        await update.message.reply_text(t('welcome_back', lang), reply_markup=menu)
+        return
+
+    # New user or ghost user (exists in DB but no phone) — show language selection
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🇪🇹 አማርኛ", callback_data="lang_am"),
@@ -464,30 +467,12 @@ async def get_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = normalize_phone(update.message.contact.phone_number)
     lang = context.user_data.get("lang", 'am')
 
-    if user_exists(user_id):
-        user = get_user(user_id)
-        existing_phone = user[1] if user and len(user) > 1 else ''
+    print(f"🔹 get_contact called by user_id={user_id}, phone={phone}, user_exists={user_exists(user_id)}, has_valid_phone={has_valid_phone(user_id)}")
 
-        # ✅ FIX 4: If user exists but has NO phone, update it (partial registration fix)
-        if not existing_phone or existing_phone in ('', 'N/A', 'None', None):
-            try:
-                from db import db as mongo_db
-                mongo_db["users"].update_one(
-                    {"user_id": user_id},
-                    {"$set": {"phone": phone}}
-                )
-                set_user_language(user_id, lang)
-                main = get_main_balance(user_id)
-                play = get_play_balance(user_id)
-                text = t('register_success', lang, phone=phone, main=main, play=play)
-                await update.message.reply_text(text, reply_markup=get_inline_menu(lang))
-                await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
-            except Exception as e:
-                print(f"❌ Phone update error for user {user_id}: {e}")
-                await update.message.reply_text("❌ Registration failed. Please try again or contact support.")
-            return
-
+    if has_valid_phone(user_id):
         # Already fully registered
+        user = get_user(user_id)
+        existing_phone = user[1] if user else ''
         lang = get_user_language(user_id)
         main = get_main_balance(user_id)
         play = get_play_balance(user_id)
@@ -497,18 +482,34 @@ async def get_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
         return
 
-    # ✅ New user registration with error handling
+    # ✅ User exists but no phone (ghost user) OR brand new user
     ref_by = context.user_data.get("ref_by")
-    try:
-        add_user(user_id, phone, first_name)
-        set_user_language(user_id, lang)
-    except Exception as e:
-        print(f"❌ Registration error for user {user_id}: {e}")
-        await update.message.reply_text(
-            "❌ Registration failed. Please try again.\n"
-            "If the problem persists, contact support: @one_day_82"
-        )
-        return
+
+    if user_exists(user_id):
+        # Ghost user — update their phone number
+        print(f"🔹 Fixing ghost user {user_id} — adding phone {phone}")
+        try:
+            from db import db as mongo_db
+            mongo_db["users"].update_one(
+                {"user_id": user_id},
+                {"$set": {"phone": phone, "first_name": first_name, "language": lang}}
+            )
+        except Exception as e:
+            print(f"❌ Phone update error for ghost user {user_id}: {e}")
+            await update.message.reply_text("❌ Registration failed. Please try again or contact support.")
+            return
+    else:
+        # Brand new user
+        try:
+            add_user(user_id, phone, first_name)
+            set_user_language(user_id, lang)
+        except Exception as e:
+            print(f"❌ Registration error for new user {user_id}: {e}")
+            await update.message.reply_text(
+                "❌ Registration failed. Please try again.\n"
+                "If the problem persists, contact support: @one_day_82"
+            )
+            return
 
     if ref_by:
         try:
@@ -533,20 +534,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
     text = custom_text if custom_text is not None else update.message.text
     first_name = update.effective_user.first_name or ''
 
-    # ✅✅✅ FIX 1: BLOCK ALL ACTIONS FOR UNREGISTERED USERS ✅✅✅
-    if not user_exists(user_id):
+    # ✅✅✅ FIX: Use has_valid_phone instead of user_exists ✅✅✅
+    # This blocks BOTH unregistered AND ghost users (no phone)
+    if not has_valid_phone(user_id):
         lang = context.user_data.get("lang", 'am')
-        button_text = t('share_phone_btn', lang)
-        button = KeyboardButton(button_text, request_contact=True)
-        keyboard = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
+        keyboard = get_register_keyboard(lang)
         await update.message.reply_text(
             "⚠️ You must register first!\n\n" + t('welcome_new', lang),
             reply_markup=keyboard
         )
         return
-    # ✅✅✅ END REGISTRATION CHECK ✅✅✅
 
-    if first_name and user_exists(user_id):
+    if first_name:
         update_user_name(user_id, first_name)
 
     lang = get_user_language(user_id)
@@ -712,7 +711,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
 
     if user_state.get(user_id) == "deposit_amount":
         if not text.isdigit():
-            err_msg = "❌ ቁጥር ብቻ ያስገቡ" if lang == 'am' else "❌ Please enter a valid number"
+            err_msg = "❌ ቁጥር ብቻ ያስገባ" if lang == 'am' else "❌ Please enter a valid number"
             await update.message.reply_text(err_msg)
             return
         amount = int(text)
@@ -948,7 +947,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
         if total_lifetime_deposits < 50:
             err_msg = (
                 "❌ ማዞር (መላክ) አይችሉም!\n\n"
-                "⚠️ ገንዘብ ለማዞር (ለመላክ) 50 ብር ማስገባት አለብዎት።ፔ\n\n"
+                "⚠️ ገንዘብ ለማዞር (ለመላክ) 50 ብር ማስገባት አለብዎት።\n\n"
                 "❌ You cannot transfer. You must deposit at least 50 ETB in total to unlock transfers."
             ) if lang == 'am' else "❌ Transfer locked!\n\n⚠️ You must deposit at least 50 ETB in total to unlock transfers."
             await update.message.reply_text(err_msg)
@@ -1092,7 +1091,7 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # --------------------------
-# inline menu & language handler
+# INLINE MENU & LANGUAGE HANDLER
 # --------------------------
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1104,37 +1103,49 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if first_name and user_exists(user_id):
         update_user_name(user_id, first_name)
 
-    # Language selection is allowed for EVERYONE (even unregistered)
+    # ✅✅✅ LANGUAGE SELECTION — allowed for EVERYONE ✅✅✅
     if data in ["lang_am", "lang_en"]:
         lang = 'am' if data == "lang_am" else 'en'
         context.user_data["lang"] = lang
-        if user_exists(user_id):
+
+        print(f"🔹 Language selected: {lang} by user_id={user_id}, user_exists={user_exists(user_id)}, has_valid_phone={has_valid_phone(user_id)}")
+
+        # ✅ FIX: Use has_valid_phone to check if user is FULLY registered
+        if has_valid_phone(user_id):
+            # Fully registered user — just change language
             set_user_language(user_id, lang)
-            await query.message.edit_text("✅ " + t('lang_changed', lang))
-            await context.bot.send_message(chat_id=user_id, text=t('welcome_back', lang), reply_markup=get_main_menu(lang))
-        else:
-            button_text = t('share_phone_btn', lang)
-            button = KeyboardButton(button_text, request_contact=True)
-            keyboard = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
             try:
-                await query.message.edit_text("✅ Language selected!")
+                await query.message.edit_text("✅ " + t('lang_changed', lang))
             except:
                 pass
+            await context.bot.send_message(chat_id=user_id, text=t('welcome_back', lang), reply_markup=get_main_menu(lang))
+        else:
+            # ✅ NEW USER or GHOST USER — show phone share button
+            # If user exists in DB but has no phone, set their language in DB
+            if user_exists(user_id):
+                set_user_language(user_id, lang)
+
+            try:
+                await query.message.edit_text("✅ " + ("ቋንቋ ተመርጧል!" if lang == 'am' else "Language selected!"))
+            except:
+                pass
+
+            keyboard = get_register_keyboard(lang)
             await context.bot.send_message(chat_id=user_id, text=t('welcome_new', lang), reply_markup=keyboard)
         return
 
-    # ✅✅✅ FIX 2: BLOCK ALL MENU ACTIONS FOR UNREGISTERED USERS ✅✅✅
-    if not user_exists(user_id):
+    # ✅✅✅ FIX: Use has_valid_phone for ALL other menu actions ✅✅✅
+    if not has_valid_phone(user_id):
         lang = context.user_data.get("lang", 'am')
-        button_text = t('share_phone_btn', lang)
-        button = KeyboardButton(button_text, request_contact=True)
-        keyboard = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
-        await query.message.reply_text(
-            "⚠️ Please register first!",
-            reply_markup=keyboard
-        )
+        keyboard = get_register_keyboard(lang)
+        try:
+            await query.message.reply_text(
+                "⚠️ Please register first! Share your phone number below.",
+                reply_markup=keyboard
+            )
+        except:
+            pass
         return
-    # ✅✅✅ END REGISTRATION CHECK ✅✅✅
 
     lang = get_user_language(user_id)
 
@@ -1246,7 +1257,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_lifetime_deposits = get_total_deposits(user_id)
         if total_lifetime_deposits < 50:
             err_msg = (
-                "❌ ማዞር (መላክ) አይችሉም!\n\n⚠️ ገንዘብ ለማዞር (ለመላክ) 50 ብር ማስገባት አለብዎት።ፔ\n\n❌ You cannot transfer. You must deposit at least 50 ETB in total to unlock transfers."
+                "❌ ማዞር (መላክ) አይችሉም!\n\n⚠️ ገንዘብ ለማዞር (ለመላክ) 50 ብር ማስገባት አለብዎት።\n\n❌ You cannot transfer. You must deposit at least 50 ETB in total to unlock transfers."
             ) if lang == 'am' else "❌ Transfer locked!\n\n⚠️ You must deposit at least 50 ETB in total to unlock transfers."
             await query.message.reply_text(err_msg)
         else:
@@ -2088,192 +2099,4 @@ def api_set_max_winners():
     game = get_game_state(room)
     mx = max(1, min(4, int(data.get('max_winners', 1))))
     game['max_winners'] = mx
-    socketio.emit('max_winners_updated', {'room': room, 'max': mx}, room=f'bingo_room_{room}')
-    return jsonify({'success': True, 'max_winners': mx, 'room': room})
-
-
-@flask_app.route('/api/admin/pause_game', methods=['POST', 'OPTIONS'])
-def api_pause_game():
-    if request.method == 'OPTIONS':
-        return jsonify({'success': True}), 200
-    data = request.json or {}
-    room = data.get('room', '10')
-    game = get_game_state(room)
-    game['paused'] = not game.get('paused', False)
-    socketio.emit('game_paused', {'room': room, 'paused': game['paused']}, room=f'bingo_room_{room}')
-    return jsonify({'success': True, 'paused': game['paused'], 'room': room})
-
-
-@flask_app.route('/api/admin/cancel_game', methods=['POST', 'OPTIONS'])
-def api_cancel_game():
-    if request.method == 'OPTIONS':
-        return jsonify({'success': True}), 200
-    data = request.json or {}
-    room = data.get('room', '10')
-    game_states[room] = default_game_state()
-    game_states[room]['timer_started_at'] = time_module.time()
-    socketio.emit('game_cancelled', {'room': room, 'reason': 'admin_cancelled'}, room=f'bingo_room_{room}')
-    return jsonify({'success': True, 'room': room})
-
-
-@flask_app.route('/api/admin/rankings', methods=['GET', 'OPTIONS'])
-def api_admin_rankings():
-    if request.method == 'OPTIONS':
-        return jsonify({'success': True}), 200
-    category = request.args.get('category', 'deposit')
-    period   = request.args.get('period', 'week')
-    limit    = int(request.args.get('limit', 30))
-    if category == 'deposit':
-        rows = get_top_by_deposit(period, limit)
-    elif category == 'invite':
-        rows = get_top_by_invitations(period, limit)
-    elif category == 'wins':
-        rows = get_top_by_wins(period, limit)
-    else:
-        rows = get_top_by_games(period, limit)
-    rankings = []
-    for r in rows:
-        phone = get_user_phone(r[0]) or '—'
-        rankings.append({'user_id': r[0], 'name': r[1] or 'User', 'phone': phone, 'value': r[2]})
-    return jsonify({'success': True, 'rankings': rankings})
-
-
-@flask_app.route('/api/admin/game_history', methods=['GET', 'OPTIONS'])
-def api_admin_game_history():
-    if request.method == 'OPTIONS':
-        return jsonify({'success': True}), 200
-    try:
-        games = db.get_admin_game_history()
-        return jsonify({'success': True, 'games': games})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@flask_app.route('/api/admin/reports', methods=['GET', 'OPTIONS'])
-def api_admin_reports():
-    if request.method == 'OPTIONS':
-        return jsonify({'success': True}), 200
-    period = request.args.get('period', 'daily')
-    try:
-        rows = db.get_admin_reports(period)
-        return jsonify({'success': True, 'rows': rows})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@flask_app.route('/api/admin/settings', methods=['POST', 'OPTIONS'])
-def api_admin_settings():
-    if request.method == 'OPTIONS':
-        return jsonify({'success': True}), 200
-    data = request.json or {}
-    print(f"⚙️ Settings updated by {data.get('admin','admin')}: {data}")
-    return jsonify({'success': True})
-
-
-# ══════════════════════════════════════════════════════════
-# FLASK SERVER RUNNER
-# ══════════════════════════════════════════════════════════
-
-def run_flask():
-    socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
-
-
-def auto_call_loop():
-    CALL_INTERVAL = 2  # Call a ball every 2 seconds
-    while True:
-        time_module.sleep(CALL_INTERVAL)
-        for room_id in list(game_states.keys()):
-            game = game_states.get(room_id)
-            if not game:
-                continue
-
-            # AUTO-START: When countdown expires, start the game on server
-            if not game['running'] and game.get('timer_started_at') and not game.get('winner_declared'):
-                elapsed = int(time_module.time() - game['timer_started_at'])
-                if elapsed >= 35:
-                    game['running'] = True
-                    game['started_at'] = time_module.time()
-                    game['timer_started_at'] = None
-                    game['winner_declared'] = False
-                    game['winner_count'] = 0
-                    socketio.emit('game_started', {
-                        'room': room_id,
-                        'game_id': game.get('game_id', ''),
-                        'total_players': count_total_cards(game)
-                    }, room=f'bingo_room_{room_id}')
-
-            # Call balls if game is running
-            if game.get('running') and not game.get('paused') and not game.get('winner_declared'):
-                called = game.get('called', [])
-                if len(called) >= 75:
-                    continue
-
-                available = [n for n in range(1, 76) if n not in called]
-                if not available:
-                    continue
-
-                number = random.choice(available)
-
-                # Re-fetch in case the game was reset between sleep and now
-                game = game_states.get(room_id)
-                if not game or not game.get('running'):
-                    continue
-
-                game.setdefault('called', []).append(number)
-                game['current'] = number
-
-                socketio.emit('ball_called', {
-                    'room': room_id,
-                    'number': number
-                }, room=f'bingo_room_{room_id}')
-
-
-# ==========================
-# APP SETUP
-# ==========================
-PROXY_URL = None
-builder = ApplicationBuilder().token(TOKEN)
-if PROXY_URL:
-    builder = builder.proxy(PROXY_URL).get_updates_proxy(PROXY_URL)
-builder = builder.connect_timeout(60.0).read_timeout(60.0).write_timeout(60.0).pool_timeout(60.0)
-app = builder.build()
-
-
-async def change_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🇪🇹 አማርኛ", callback_data="lang_am"),
-            InlineKeyboardButton("🇸🇸 English", callback_data="lang_en")
-        ]
-    ])
-    await update.message.reply_text(t('select_language', 'en'), reply_markup=keyboard)
-
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("lang", change_lang))
-app.add_handler(CommandHandler("info", info))
-app.add_handler(CommandHandler("ap", approve))
-app.add_handler(CommandHandler("re", reject))
-app.add_handler(CommandHandler("play", cmd_play))
-app.add_handler(CommandHandler("deposit", cmd_deposit))
-app.add_handler(CommandHandler("balance", cmd_balance))
-app.add_handler(CommandHandler("withdraw", cmd_withdraw))
-app.add_handler(CommandHandler("profile", cmd_profile))
-app.add_handler(CommandHandler("support", cmd_support))
-app.add_handler(CommandHandler("invite", cmd_invite))
-app.add_handler(CommandHandler("transfer", cmd_transfer))
-app.add_handler(CommandHandler("history", cmd_history))
-app.add_handler(CommandHandler("agent", cmd_agent))
-app.add_handler(CallbackQueryHandler(handle_callback))
-app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
-app.add_handler(MessageHandler(filters.CONTACT, get_contact))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-flask_thread = threading.Thread(target=run_flask, daemon=True)
-flask_thread.start()
-
-auto_call_thread = threading.Thread(target=auto_call_loop, daemon=True)
-auto_call_thread.start()
-
-print("✅ Bot is running with Multi-Room SocketIO + Auto-Caller + MongoDB Cloud + Registration Fixes...")
-app.run_polling()
+    socketio.emit('max_winners_updated', {'room': room, 'max':
