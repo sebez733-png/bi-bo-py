@@ -566,18 +566,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if first_name and user_exists(user_id): update_user_name(user_id, first_name)
 
     if data in ["lang_am", "lang_en"]:
-        lang = 'am' if data == "lang_am" else 'en'; context.user_data["lang"] = lang
-        if has_valid_phone(user_id):
+    lang = 'am' if data == "lang_am" else 'en'
+    context.user_data["lang"] = lang
+
+    if has_valid_phone(user_id):
+        set_user_language(user_id, lang)
+        try:
+            await query.message.edit_text("✅ " + t('lang_changed', lang))
+        except:
+            pass
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=t('welcome_back', lang),
+            reply_markup=get_main_menu(lang)
+        )
+    else:
+        if user_exists(user_id):
             set_user_language(user_id, lang)
-            try: await query.message.edit_text("✅ " + t('lang_changed', lang))
-            except: pass
-            await context.bot.send_message(chat_id=user_id, text=t('welcome_back', lang), reply_markup=get_main_menu(lang))
-        else:
-            if user_exists(user_id): set_user_language(user_id, lang)
-            try: await query.message.edit_text("✅ " + ("ቋንቋ ተመርጧል!" if lang == 'am' else "Language selected!"))
-            except: pass
-            await context.bot.send_message(chat_id=user_id, text=t('welcome_new', lang), reply_markup=get_register_keyboard(lang))
-        return
+        try:
+            await query.message.edit_text(
+                "✅ " + ("ቋንቋ ተመርጧል!" if lang == 'am' else "Language selected!")
+            )
+        except:
+            pass
+        await context.bot.send_message(
+            chat_id=query.message.chat.id,  # ← CHANGE THIS LINE
+            text=t('welcome_new', lang),
+            reply_markup=get_register_keyboard(lang)
+        )
+    return
 
     if not has_valid_phone(user_id):
         lang = context.user_data.get("lang", 'am')
