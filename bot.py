@@ -193,20 +193,17 @@ def default_game_state():
         'current': None
     }
 
-# ✅ FIX 2: Helper function that ensures room exists in game_states dict
 def get_game_state(room):
     """Get or create game state for a room, always persisted in game_states dict."""
     if room not in game_states:
         game_states[room] = default_game_state()
     return game_states[room]
 
-# Separate states for Room 10 and Room 20
 game_states = {
     '10': default_game_state(),
     '20': default_game_state()
 }
 
-# ✅ FIX 1: Helper function to count total cards (not unique users)
 def count_total_cards(game):
     """Count total cards across all ready players, not unique users."""
     return sum(len(p.get('cards', [])) for p in game.get('ready_players', {}).values())
@@ -331,13 +328,11 @@ TEXTS = {
     }
 }
 
-
 def t(key, lang='am', **kwargs):
     text = TEXTS.get(key, {}).get(lang, TEXTS.get(key, {}).get('am', key))
     if kwargs:
         text = text.format(**kwargs)
     return text
-
 
 # --------------------------
 # HELPER: Normalize Phone
@@ -349,7 +344,6 @@ def normalize_phone(phone):
     if not phone.startswith("0") and len(phone) == 9:
         phone = "0" + phone
     return phone
-
 
 # --------------------------
 # HELPER: Get Main Menu
@@ -373,7 +367,6 @@ def get_main_menu(lang='am'):
             ["🎁 Invite Friends / ጓደኛ ይጋብዙ", "🤖 Agent Panel"],
             ["🔄 Transfer / ይላኩ", "ℹ️ Info / መረጃ"]
         ], resize_keyboard=True)
-
 
 # --------------------------
 # HELPER: Get Inline Menu
@@ -428,7 +421,6 @@ def get_inline_menu(lang='am'):
             ]
         ])
 
-
 # --------------------------
 # START
 # --------------------------
@@ -439,12 +431,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["ref_by"] = ref_id
 
     if user_exists(user_id):
-        lang = get_user_language(user_id)
-        update_user_name(user_id, first_name)
-        menu = get_main_menu(lang)
-        await update.message.reply_text(t('welcome_back', lang), reply_markup=menu)
-        return
+        user = get_user(user_id)
+        # ✅ FIX 3: CHECK if user has a VALID phone number (prevents ghost users from bypassing registration)
+        phone = user[1] if user and len(user) > 1 else ''
+        if phone and phone not in ('', 'N/A', 'None', None):
+            # Fully registered user
+            lang = get_user_language(user_id)
+            update_user_name(user_id, first_name)
+            menu = get_main_menu(lang)
+            await update.message.reply_text(t('welcome_back', lang), reply_markup=menu)
+            return
+        else:
+            # ⚠️ Partially registered (exists in DB but no phone) — force re-registration
+            pass  # Fall through to language selection below
 
+    # New user or partially registered user — show language selection
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🇪🇹 አማርኛ", callback_data="lang_am"),
@@ -464,22 +465,56 @@ async def get_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = context.user_data.get("lang", 'am')
 
     if user_exists(user_id):
-        lang = get_user_language(user_id)
         user = get_user(user_id)
+        existing_phone = user[1] if user and len(user) > 1 else ''
+
+        # ✅ FIX 4: If user exists but has NO phone, update it (partial registration fix)
+        if not existing_phone or existing_phone in ('', 'N/A', 'None', None):
+            try:
+                from db import db as mongo_db
+                mongo_db["users"].update_one(
+                    {"user_id": user_id},
+                    {"$set": {"phone": phone}}
+                )
+                set_user_language(user_id, lang)
+                main = get_main_balance(user_id)
+                play = get_play_balance(user_id)
+                text = t('register_success', lang, phone=phone, main=main, play=play)
+                await update.message.reply_text(text, reply_markup=get_inline_menu(lang))
+                await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
+            except Exception as e:
+                print(f"❌ Phone update error for user {user_id}: {e}")
+                await update.message.reply_text("❌ Registration failed. Please try again or contact support.")
+            return
+
+        # Already fully registered
+        lang = get_user_language(user_id)
         main = get_main_balance(user_id)
         play = get_play_balance(user_id)
         ref_count = get_referral_count(user_id)
-        text = t('already_registered', lang, phone=user[1], main=main, play=play, ref_count=ref_count)
+        text = t('already_registered', lang, phone=existing_phone, main=main, play=play, ref_count=ref_count)
         await update.message.reply_text(text, reply_markup=get_inline_menu(lang))
         await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
         return
 
+    # ✅ New user registration with error handling
     ref_by = context.user_data.get("ref_by")
-    add_user(user_id, phone, first_name)
-    set_user_language(user_id, lang)
+    try:
+        add_user(user_id, phone, first_name)
+        set_user_language(user_id, lang)
+    except Exception as e:
+        print(f"❌ Registration error for user {user_id}: {e}")
+        await update.message.reply_text(
+            "❌ Registration failed. Please try again.\n"
+            "If the problem persists, contact support: @one_day_82"
+        )
+        return
 
     if ref_by:
-        set_referral(user_id, ref_by)
+        try:
+            set_referral(user_id, ref_by)
+        except Exception as e:
+            print(f"❌ Referral error for user {user_id}: {e}")
 
     main = get_main_balance(user_id)
     play = get_play_balance(user_id)
@@ -496,15 +531,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
     global request_counter
     user_id = update.effective_user.id
     text = custom_text if custom_text is not None else update.message.text
-
     first_name = update.effective_user.first_name or ''
+
+    # ✅✅✅ FIX 1: BLOCK ALL ACTIONS FOR UNREGISTERED USERS ✅✅✅
+    if not user_exists(user_id):
+        lang = context.user_data.get("lang", 'am')
+        button_text = t('share_phone_btn', lang)
+        button = KeyboardButton(button_text, request_contact=True)
+        keyboard = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text(
+            "⚠️ You must register first!\n\n" + t('welcome_new', lang),
+            reply_markup=keyboard
+        )
+        return
+    # ✅✅✅ END REGISTRATION CHECK ✅✅✅
+
     if first_name and user_exists(user_id):
         update_user_name(user_id, first_name)
 
-    if user_exists(user_id):
-        lang = get_user_language(user_id)
-    else:
-        lang = context.user_data.get("lang", 'am')
+    lang = get_user_language(user_id)
 
     main_menu_buttons_am = [
         "🎮 Open Game / ይጫወቱ",
@@ -1059,22 +1104,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if first_name and user_exists(user_id):
         update_user_name(user_id, first_name)
 
+    # Language selection is allowed for EVERYONE (even unregistered)
     if data in ["lang_am", "lang_en"]:
         lang = 'am' if data == "lang_am" else 'en'
         context.user_data["lang"] = lang
         if user_exists(user_id):
             set_user_language(user_id, lang)
-            await query.message.edit_text(t('lang_changed', lang))
+            await query.message.edit_text("✅ " + t('lang_changed', lang))
             await context.bot.send_message(chat_id=user_id, text=t('welcome_back', lang), reply_markup=get_main_menu(lang))
         else:
             button_text = t('share_phone_btn', lang)
             button = KeyboardButton(button_text, request_contact=True)
             keyboard = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
-            await query.message.edit_text(t('select_language'))
+            try:
+                await query.message.edit_text("✅ Language selected!")
+            except:
+                pass
             await context.bot.send_message(chat_id=user_id, text=t('welcome_new', lang), reply_markup=keyboard)
         return
 
-    lang = get_user_language(user_id) if user_exists(user_id) else context.user_data.get("lang", 'am')
+    # ✅✅✅ FIX 2: BLOCK ALL MENU ACTIONS FOR UNREGISTERED USERS ✅✅✅
+    if not user_exists(user_id):
+        lang = context.user_data.get("lang", 'am')
+        button_text = t('share_phone_btn', lang)
+        button = KeyboardButton(button_text, request_contact=True)
+        keyboard = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
+        await query.message.reply_text(
+            "⚠️ Please register first!",
+            reply_markup=keyboard
+        )
+        return
+    # ✅✅✅ END REGISTRATION CHECK ✅✅✅
+
+    lang = get_user_language(user_id)
 
     if data.startswith("menu_"):
         user_state.pop(user_id, None)
@@ -1623,9 +1685,6 @@ def api_game_played():
     return jsonify({'success': True})
 
 
-# ✅ FIX 3: Removed the auto-start logic from api_game_state.
-# The game now only starts via socket events or /api/start_game.
-# This was the root cause of the Room 20 restart bug after ~19 calls.
 @flask_app.route('/api/game_state', methods=['GET', 'OPTIONS'])
 def api_game_state():
     room = request.args.get('room', '10')
@@ -1637,8 +1696,6 @@ def api_game_state():
         if game['timer_started_at']:
             elapsed = int(now - game['timer_started_at'])
             time_left = max(0, 35 - elapsed)
-            # ✅ REMOVED auto-start: do NOT set game['running'] = True here.
-            # Game starts only via socket 'game_started' event or /api/start_game.
         else:
             game['timer_started_at'] = now
             time_left = 35
@@ -1669,7 +1726,6 @@ def api_start_game():
     return jsonify({'success': True})
 
 
-# ✅ FIX 3b: api_end_game now emits game_cancelled so all clients reset their UI cleanly.
 @flask_app.route('/api/end_game', methods=['POST', 'OPTIONS'])
 def api_end_game():
     if request.method == 'OPTIONS':
@@ -2122,8 +2178,6 @@ def run_flask():
     socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
 
 
-# ✅ FIX 2: auto_call_loop now iterates over a snapshot of room IDs and
-# re-fetches the game state after sleep to avoid stale references after a reset.
 def auto_call_loop():
     CALL_INTERVAL = 2  # Call a ball every 2 seconds
     while True:
@@ -2133,7 +2187,7 @@ def auto_call_loop():
             if not game:
                 continue
 
-            # ✅ AUTO-START: When countdown expires, start the game on server
+            # AUTO-START: When countdown expires, start the game on server
             if not game['running'] and game.get('timer_started_at') and not game.get('winner_declared'):
                 elapsed = int(time_module.time() - game['timer_started_at'])
                 if elapsed >= 35:
@@ -2218,9 +2272,8 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
 
-# ✅ Start the automatic game loop thread
 auto_call_thread = threading.Thread(target=auto_call_loop, daemon=True)
 auto_call_thread.start()
 
-print("✅ Bot is running with Multi-Room SocketIO + Auto-Caller + MongoDB Cloud...")
+print("✅ Bot is running with Multi-Room SocketIO + Auto-Caller + MongoDB Cloud + Registration Fixes...")
 app.run_polling()
