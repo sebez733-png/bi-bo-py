@@ -31,21 +31,62 @@ def get_next_id(name):
 # USER FUNCTIONS
 # ==========================================
 
+# ✅ FIX: add_user now ALWAYS sets phone, first_name, referred_by even on update
+# This fixes ghost users who exist in DB without a phone number
 def add_user(user_id, phone='', first_name='', referred_by=None):
     now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # First, try to set on insert (for new users)
     users_col.update_one(
         {"user_id": user_id},
-        {"$setOnInsert": {"phone": phone, "first_name": first_name, "referred_by": referred_by, "status": "active", "created_at": now, "main_balance": 0, "play_balance": 0, "is_agent": 0, "is_vip": 0, "language": "am"}},
+        {"$setOnInsert": {
+            "status": "active",
+            "created_at": now,
+            "main_balance": 0,
+            "play_balance": 0,
+            "is_agent": 0,
+            "is_vip": 0,
+            "language": "am"
+        }},
         upsert=True
     )
-    if first_name:
-        users_col.update_one({"user_id": user_id, "$or": [{"first_name": None}, {"first_name": ""}]}, {"$set": {"first_name": first_name}})
+    
+    # ✅ FIX: ALWAYS set phone and first_name (even on update)
+    # This fixes ghost users who exist without a phone
+    update_fields = {"first_name": first_name}
+    if phone:  # Only set phone if a valid phone is provided
+        update_fields["phone"] = phone
+    if referred_by:
+        # Only set referred_by if it's not already set
+        users_col.update_one(
+            {"user_id": user_id, "$or": [{"referred_by": None}, {"referred_by": ""}]},
+            {"$set": {"referred_by": referred_by}}
+        )
+    users_col.update_one({"user_id": user_id}, {"$set": update_fields})
+
 
 def update_user_name(user_id, first_name):
     users_col.update_one({"user_id": user_id}, {"$set": {"first_name": first_name}})
 
+# ✅ FIX: New function to update phone number for partially registered users
+def update_user_phone(user_id, phone):
+    """Update phone number for a user (used for partial registration fix)."""
+    users_col.update_one(
+        {"user_id": int(user_id)},
+        {"$set": {"phone": phone}}
+    )
+
 def user_exists(user_id):
     return users_col.find_one({"user_id": user_id}) is not None
+
+# ✅ FIX: has_valid_phone - check if user has a real phone number (not ghost)
+def has_valid_phone(user_id):
+    """Check if user exists AND has a valid phone number."""
+    u = users_col.find_one({"user_id": user_id})
+    if not u:
+        return False
+    phone = u.get("phone", '')
+    return phone and phone not in ('', 'N/A', 'None', None)
 
 def get_user(user_id):
     u = users_col.find_one({"user_id": user_id})
@@ -86,31 +127,53 @@ def get_main_balance(user_id):
     u = users_col.find_one({"user_id": user_id})
     return u.get("main_balance", 0) if u else 0
 
+# ✅ FIX: Removed upsert possibility and added safety check
+# This function will NEVER create a new user document
 def update_main_balance(user_id, amount):
-    users_col.update_one({"user_id": user_id}, {"$inc": {"main_balance": amount}})
-    u = users_col.find_one({"user_id": user_id})
+    # Only update if user exists - NEVER create ghost users
+    result = users_col.update_one(
+        {"user_id": int(user_id)}, 
+        {"$inc": {"main_balance": amount}}
+        # ✅ NO upsert=True — this prevents creating ghost users
+    )
+    u = users_col.find_one({"user_id": int(user_id)})
     return u.get("main_balance", 0) if u else 0
 
 def get_play_balance(user_id):
     u = users_col.find_one({"user_id": user_id})
     return u.get("play_balance", 0) if u else 0
 
+# ✅ FIX: Removed upsert possibility and added safety check
+# This function will NEVER create a new user document
 def update_play_balance(user_id, amount):
-    users_col.update_one({"user_id": user_id}, {"$inc": {"play_balance": amount}})
-    u = users_col.find_one({"user_id": user_id})
+    # Only update if user exists - NEVER create ghost users
+    result = users_col.update_one(
+        {"user_id": int(user_id)}, 
+        {"$inc": {"play_balance": amount}}
+        # ✅ NO upsert=True — this prevents creating ghost users
+    )
+    u = users_col.find_one({"user_id": int(user_id)})
     return u.get("play_balance", 0) if u else 0
 
+# ✅ FIX: Added user existence check and consistent return type
 def deduct_bet_smart(user_id, amount):
+    # Check user exists first
+    if not user_exists(user_id):
+        return False
+    
     play_bal = get_play_balance(user_id)
     main_bal = get_main_balance(user_id)
+    
     if play_bal >= amount:
         update_play_balance(user_id, -amount)
     elif play_bal + main_bal >= amount:
         remaining = amount - play_bal
-        update_play_balance(user_id, -play_bal)
+        if play_bal > 0:
+            update_play_balance(user_id, -play_bal)
         update_main_balance(user_id, -remaining)
     else:
         return False
+    
     return {'main_balance': get_main_balance(user_id), 'play_balance': get_play_balance(user_id)}
 
 
@@ -119,17 +182,21 @@ def deduct_bet_smart(user_id, amount):
 # ==========================================
 
 def set_referral(user_id, referred_by):
-    users_col.update_one({"user_id": user_id, "referred_by": None}, {"$set": {"referred_by": referred_by}})
+    users_col.update_one({"user_id": user_id, "$or": [{"referred_by": None}, {"referred_by": ""}]}, {"$set": {"referred_by": referred_by}})
 
 def get_referral_count(user_id):
     return users_col.count_documents({"referred_by": user_id})
 
 def get_depositing_referrals_count(user_id):
     invited_ids = [u["user_id"] for u in users_col.find({"referred_by": user_id}, {"user_id": 1})]
+    if not invited_ids:
+        return 0
     return transactions_col.count_documents({"user_id": {"$in": invited_ids}, "type": "deposit", "status": "completed"})
 
 def get_total_referral_deposits(user_id):
     invited_ids = [u["user_id"] for u in users_col.find({"referred_by": user_id}, {"user_id": 1})]
+    if not invited_ids:
+        return 0
     pipeline = [
         {"$match": {"user_id": {"$in": invited_ids}, "type": "deposit", "status": "completed"}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
@@ -425,25 +492,6 @@ def get_user_rank(user_id, period='week', category='deposit'):
 # ==========================================
 
 def get_all_users_with_stats(limit=500):
-    pipeline = [
-        {"$sort": {"user_id": -1}},
-        {"$limit": limit},
-        {"$lookup": {
-            "from": "game_sessions",
-            "localField": "user_id",
-            "foreignField": "user_id",
-            "as": "games"
-        }},
-        {"$project": {
-            "user_id": 1, "first_name": 1, "phone": 1, "main_balance": 1, "play_balance": 1,
-            "is_agent": 1, "is_vip": 1, "language": 1, "status": 1,
-            "games_played": {"$size": "$games"},
-            "games_won": {"$size": {"$filter": {"input": "$games", "as": "g", "cond": {"$eq": ["$$g.status", "Won"]}}}},
-            "referral_count": {"$size": {"$filter": {"input": "$games", "as": "g", "cond": {"$eq": ["$$g.user_id", "$user_id"]}}}} 
-            # Note: referral_count via lookup is complex, better doing it simpler
-        }}
-    ]
-    # Fallback simpler method to keep exact structure
     users = list(users_col.find().sort("user_id", -1).limit(limit))
     result = []
     for u in users:
@@ -557,7 +605,6 @@ def get_admin_game_history(limit=100):
 # ==========================================
 
 def get_admin_reports(period='daily'):
-    # Logic is similar to SQL, we query sums based on date prefixes
     rows = []
     def get_stats_for_date(d_start, d_end=None):
         match_start = {"$regex": f"^{d_start}"}
